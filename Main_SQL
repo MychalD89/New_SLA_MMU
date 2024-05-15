@@ -1,0 +1,3183 @@
+--For April we will need to add +1 to the reporting end date for SLAs looking at 90 days of enrollment
+--For May we will need to add +1 to the reporting start date for SLAs looking at 90 days of enrollment 
+--This is to account for Feb not having 30 days 
+Declare reporting_start_date Datetime Default '2024-02-01';
+Declare reporting_end_date Datetime Default '2024-02-29';  
+  
+
+
+
+--Selecting all Tufts members from the tufts base member table
+
+CREATE TEMP TABLE eligible_members as (
+with staticMMU_stg as (
+Select distinct  
+unnested_patientids as patientid,--column A
+memberid,--column B
+eligEffectiveDate,--column F
+eligEndDate,--column G
+DATE_ADD(eligEffectiveDate, INTERVAL 30 DAY) as eligEffectiveDate30,--column I
+DATE_ADD(eligEffectiveDate, INTERVAL 90 DAY) as eligEffectiveDate90,--column J
+DATE_ADD(eligEffectiveDate, INTERVAL 120 DAY) as eligEffectiveDate120,--column K
+DATE_SUB(eligEffectiveDate, INTERVAL 30 DAY) eligEffectiveDatePrior30 --column H
+  FROM `cityblock-analytics.abs_member.abs_enterprise_member_elig_compliance`  
+  cross join
+unnest (patientIds) as unnested_patientids 
+Where partner='tufts' and eligEffectiveDate is not null and 
+unnested_patientids !='' and 
+eligEffectiveDate < eligEndDate and
+eligibleWithCBH = true and
+eligibleWithPartner = true and-- removes members that opted out
+eligEffectiveDate <=reporting_end_date -- removes members that have a start day after the reporting period 5/3/2024 MD
+)
+
+,staticMMU as (
+
+Select a.*,
+b.deceasedStatus --added 5/6/2024 MD
+From 
+staticMMU_stg as a
+left join
+(
+Select distinct patientid,deceasedStatus
+From 
+`cityblock-analytics.mrt_commons.member`
+where deceasedStatus = 'true' and partnerName = 'Tufts'
+) as b
+on a.patientid = b.patientid
+)
+
+
+
+--14315 no flags
+--cbh flag 14035
+
+--Selecting all Tufts members from the tufts base member table
+, StaticMMU_Tufts_Base as (
+Select distinct 
+e.patientid,
+d.firstname, --column C
+d.lastname, --column D
+e.memberid,
+d.dateOfBirth,
+e.eligEffectiveDate,
+e.eligEndDate,
+e.deceasedStatus,
+eligEffectiveDatePrior30,
+eligEffectiveDate30,
+eligEffectiveDate90,
+eligEffectiveDate120
+  FROM staticMMU e
+  left join 
+  `cityblock-analytics.abs_member.abs_enterprise_member_demo_compliance` d 
+  on
+  e.patientid=d.patientid
+)
+
+SElect *
+From StaticMMU_Tufts_Base
+
+);
+
+
+
+CREATE TEMP TABLE DBT_HRA_Model as (
+Select distinct a.*,
+b.dateofHra as assessmentDate,
+b.hra_Submitted_to_Gateway
+From 
+eligible_members as a 
+left join
+(
+Select *
+From 
+`cityblock-analytics.abs_client_reporting.compliance_tufts_assessment` 
+where (rnk = 1 or rnk is null ) -- includes P32 HRAs
+and dateofhra <= reporting_end_date
+) as b
+on a.memberid = b.memberid and dateofhra between eligEffectiveDate and eligEndDate
+
+);
+
+
+CREATE TEMP TABLE eligible_assessments as (
+--Selecting assessments ranks
+  with assessments as (
+  select  *,
+
+  case when (assessmentDate between eligEffectiveDate and eligEndDate) and
+   assessmentDate <=reporting_end_date then
+  rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by assessmentDate ) else null end as Current_rnk,
+
+  case when assessmentDate between eligEffectiveDate and eligEndDate then
+  rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by assessmentDate ) else null end as Initial_rnk, --used for column L
+  
+  case when (assessmentDate between eligEffectiveDate and eligEndDate) and 
+  (assessmentDate between eligEffectiveDate and eligEffectiveDate90) and  
+  (assessmentDate <= reporting_end_date) then 
+  rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by assessmentDate )else null end as dateHRA90_rnk, --used for column M
+
+  case when (assessmentDate between eligEffectiveDate and eligEndDate) and 
+  (assessmentDate between reporting_start_date and reporting_end_date) then
+  rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by  assessmentDate ) else null end as dateHraReportingPeriod_rnk, --used for column N
+
+  case when  (assessmentDate between eligEffectiveDate and eligEndDate) and 
+  (extract(year from assessmentDate) = extract(year from (date_sub(reporting_start_date,interval 1 year)))) then 
+  rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by  assessmentDate desc ) else null end as datelastHraPriorYr_rnk,--used for column Q
+
+  case when  (assessmentDate between eligEffectiveDate and eligEndDate) and 
+  (extract(year from assessmentDate) = extract(year from (date_sub(reporting_start_date,interval 2 year)))) then 
+  rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by  assessmentDate desc ) else null end as datelastHraPrior2Yr_rnk, --used for column R
+
+from 
+DBT_HRA_Model
+  )
+--used for Current Assessment
+,Current_assessments_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by assessmentDate desc ) as Current_rnk
+From 
+assessments
+where Current_rnk is not null
+)
+
+,Current_assessments as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From Current_assessments_stg
+Where Current_rnk = 1
+)
+
+
+--used for column L
+,Initial_assessments_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by assessmentDate ) as Initial_rnk
+From 
+assessments
+where Initial_rnk is not null
+)
+
+,Initial_assessments as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From Initial_assessments_stg
+Where Initial_rnk = 1
+)
+
+--used for column M
+,dateHRA90_assessments_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by assessmentDate )as dateHRA90_rnk
+From 
+assessments
+where dateHRA90_rnk is not null
+)
+
+,dateHRA90_assessments as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From dateHRA90_assessments_stg
+Where dateHRA90_rnk = 1
+)
+
+--used for column N
+,dateHraReportingPeriod_assessments_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by assessmentDate ) as dateHraReportingPeriod_rnk
+From 
+assessments
+where dateHraReportingPeriod_rnk is not null
+)
+
+,dateHraReportingPeriod_assessments as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From dateHraReportingPeriod_assessments_stg
+Where dateHraReportingPeriod_rnk = 1
+)
+
+--used for column Q
+,datelastHraPriorYr_assessments_stg as(
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by  assessmentDate desc ) as datelastHraPriorYr_rnk
+From 
+assessments
+where datelastHraPriorYr_rnk is not null
+)
+
+,datelastHraPriorYr_assessments as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From datelastHraPriorYr_assessments_stg
+Where datelastHraPriorYr_rnk = 1
+)
+
+--used for column R
+,datelastHraPrior2Yr_assessments_stg as(
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by  assessmentDate desc ) as datelastHraPrior2Yr_rnk
+From 
+assessments
+where datelastHraPrior2Yr_rnk is not null
+)
+
+,datelastHraPrior2Yr_assessments as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From datelastHraPrior2Yr_assessments_stg
+Where datelastHraPrior2Yr_rnk = 1
+)
+
+
+, assessments_siloed as (
+Select a.*except(Initial_rnk,dateHRA90_rnk,dateHraReportingPeriod_rnk,datelastHraPriorYr_rnk,datelastHraPrior2Yr_rnk,assessmentDate,hra_Submitted_to_Gateway,current_rnk),
+b.assessmentDate as dateInitialHra,--column L
+c.assessmentDate as dateHRA90, --column M
+d.assessmentDate as dateHraReportingPeriod, --column N
+e.assessmentDate as datelastHraPriorYr,--column Q
+f.assessmentDate as datelastHraPrior2Yr, --column R
+g.assessmentDate as current_HRA_Date -- current assessment date
+From 
+assessments as a
+left join
+Initial_assessments as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate --and a.assessmentDate = b.assessmentDate
+left join
+dateHRA90_assessments as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate --and a.assessmentDate = c.assessmentDate
+left join
+dateHraReportingPeriod_assessments as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate -- and a.assessmentDate = d.assessmentDate
+left join
+datelastHraPriorYr_assessments as e
+on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate --and a.assessmentDate = e.assessmentDate
+left join
+datelastHraPrior2Yr_assessments as f
+on a.memberid = f.memberid and a.eligEffectiveDate = f.eligEffectiveDate and a.eligEndDate = f.eligEndDate --and a.assessmentDate = f.assessmentDate
+left join
+Current_assessments as g
+on a.memberid = g.memberid and a.eligEffectiveDate = g.eligEffectiveDate and a.eligEndDate = g.eligEndDate
+)
+
+,Cohort_Reporting as (
+Select distinct *,
+case 
+when date_diff(dateHraReportingPeriod,eligEffectiveDate,DAY) between 0 and 30 then '0 - 30 days'
+when date_diff(dateHraReportingPeriod,eligEffectiveDate,DAY) between 31 and 60 then '31 - 60 days'
+when date_diff(dateHraReportingPeriod,eligEffectiveDate,DAY) between 61 and 90 then '61 - 90 days'
+when date_diff(dateHraReportingPeriod,eligEffectiveDate,DAY) between 91 and 120 then '91 - 120 days'
+when date_diff(dateHraReportingPeriod,eligEffectiveDate,DAY) > 120 then '120 plus days'
+end as cohortHraReportingPeriod --column O
+
+From 
+assessments_siloed as a 
+
+)
+
+,Previous_Assessment_Rnk as (
+Select a.*,b.assessmentDate,
+
+case when (assessmentDate between a.eligEffectiveDate and a.eligEndDate) and
+assessmentDate <=reporting_end_date and
+a.dateInitialHra is not null then
+rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by assessmentDate ) else null end as Previous_rnk
+From
+Cohort_Reporting as a
+join
+DBT_HRA_Model as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+)
+
+--used for Previous Assessment
+,Previous_assessments_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by assessmentDate desc ) as Previous_rnk
+From 
+Previous_Assessment_Rnk
+where Previous_rnk is not null
+)
+
+,Previous_assessments as (
+Select memberid, eligEffectiveDate,eligEndDate,assessmentDate
+From Previous_assessments_stg
+Where Previous_rnk = 2
+)
+
+Select a.*,b.assessmentDate as previous_HRA_Date
+From 
+Cohort_Reporting as a
+left join
+Previous_assessments as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate 
+
+);
+--20155
+
+
+
+CREATE TEMP TABLE reassessments as (
+
+--used for column P
+--Criteria 1
+with ReassessmentDue_1 as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,dateInitialHra,datelastHraPriorYr,
+datelastHraPriorYr + 365  as dateReassessmentDue_1
+         
+From eligible_assessments
+where 
+dateInitialHra is not null and datelastHraPriorYr is not null --and
+--(date_add(datelastHraPriorYr, interval 365 day) <= eligEndDate)
+)
+
+
+--used for column P
+--Criteria 2
+,ReassessmentDue_2 as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,dateInitialHra,datelastHraPrior2Yr,
+cast ((concat( extract(year from reporting_start_date),'-',extract(month from datelastHraPrior2Yr),'-',extract(day from datelastHraPrior2Yr))) as date) as dateReassessmentDue_2
+
+From eligible_assessments
+Where 
+dateInitialHra is not null and datelastHraPriorYr is null --and 
+--cast((concat( extract(year from reporting_start_date),'-',extract(month from datelastHraPrior2Yr),'-',extract(day from datelastHraPrior2Yr))) as date)<= eligEndDate
+)
+
+--criteria 3
+,ReassessmentDue_3 as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,
+--date_add(dateInitialHra,interval 365 Day) as dateReassessmentDue_3
+cast ((concat( extract(year from reporting_start_date),'-',extract(month from dateInitialHra),'-',extract(day from dateInitialHra))) as date) as dateReassessmentDue_3
+From eligible_assessments
+where dateInitialHra is not null and 
+datelastHraPriorYr is null and 
+datelastHraPrior2Yr is null 
+)
+--criteria 4
+,ReassessmentDue_4 as(
+Select distinct memberid,eligEffectiveDate,eligEndDate,
+case when cast ((concat( extract(year from reporting_start_date),'-',extract(month from datelastHraPriorYr),'-',extract(day from datelastHraPriorYr))) as date) 
+< 
+cast((concat( extract(year from reporting_start_date),'-',extract(month from current_HRA_Date),'-',extract(day from current_HRA_Date))) as date)
+then null
+else 
+cast ((concat( extract(year from reporting_start_date),'-',extract(month from current_HRA_Date),'-',extract(day from current_HRA_Date))) as date) 
+end as dateReassessmentDue_4
+--cast ((concat( extract(year from reporting_start_date),'-',extract(month from current_HRA_Date),'-',extract(day from current_HRA_Date))) as date) as dateReassessmentDue_4
+
+
+From eligible_assessments
+where 
+dateInitialHra is not null and  
+current_HRA_Date <= eligEndDate and
+dateInitialHra != current_HRA_Date 
+)
+
+
+
+
+, ReassessmentDue as (
+Select distinct a.*,
+
+case when dateReassessmentDue_4 is not null then dateReassessmentDue_4
+     when dateReassessmentDue_3 is not null then dateReassessmentDue_3
+     when dateReassessmentDue_1 is not null then dateReassessmentDue_1
+     when dateReassessmentDue_2 is not null then dateReassessmentDue_2
+     else null
+     end as dateReassessmentDue
+/*
+safe_cast(concat(ifnull(cast(e.dateReassessmentDue_4 as string),""),ifnull(cast(c.dateReassessmentDue_2 as string),""),ifnull(cast(d.dateReassessmentDue_3 as string),""),ifnull(cast(b.dateReassessmentDue_1 as string),"")) as date) as dateReassessmentDue*/ --column P
+From 
+eligible_assessments as a
+left join 
+ReassessmentDue_1 as b on 
+a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate --and a.dateInitialHra = b.dateInitialHra and a.datelastHraPriorYr = b.datelastHraPriorYr
+left join 
+ReassessmentDue_2 as c on 
+a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate --and a.dateInitialHra = c.dateInitialHra and a.datelastHraPrior2Yr = c.datelastHraPrior2Yr
+left join 
+ReassessmentDue_3 as d on
+a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+left join
+ReassessmentDue_4 as e on
+a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
+)
+
+, dateHraReassess_stg as (
+Select a.memberid,a.eligEffectiveDate,a.eligEndDate,b.assessmentDate,
+dense_rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  b.assessmentDate)  as dateHraReassessment_rnk
+From 
+ReassessmentDue as a
+left join
+DBT_HRA_Model as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+where assessmentDate between date_sub(dateReassessmentDue ,interval 364 day) and dateReassessmentDue 
+)
+
+
+, dateHraReassess as (
+Select *
+From 
+dateHraReassess_stg
+where dateHraReassessment_rnk = 1
+)
+
+, dateHraReassessment_cte as (
+Select distinct a.*,b.assessmentDate as dateHraReassessment --column S
+From
+ReassessmentDue as a
+left join
+dateHraReassess as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate --and a.assessmentDate = b.assessmentDate
+)
+
+
+--dateHraPlus60
+,dateHraPlus60_CTE_stg as (
+Select a.memberid,a.eligEffectiveDate,a.eligEndDate,assessmentDate,hra_Submitted_to_Gateway,
+dense_rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  assessmentDate) as HraPlus60_rnk
+From dateHraReassessment_cte as a
+join
+DBT_HRA_Model as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+where DATE_ADD(assessmentDate,interval 60 DAY) between reporting_start_date and reporting_end_date
+)
+
+
+,dateHraPlus60_CTE as (
+Select *,DATE_ADD(assessmentDate,interval 60 DAY) as dateHraPlus60 --column T
+From dateHraPlus60_CTE_stg
+where HraPlus60_rnk = 1
+)
+
+
+--submitDateHraPlus60
+,submitDateHraPlus60_CTE as (
+Select distinct a.*,b.dateHraPlus60,
+b.hra_Submitted_to_Gateway as submitDateHraPlus60 --column U
+
+--case when a.assessmentDate = b.assessmentDate then hra_Submitted_to_Gateway else null end as submitDateHraPlus60, --column U
+From 
+dateHraReassessment_cte as a 
+left join
+dateHraPlus60_CTE as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate --and a.assessmentDate = b.assessmentDate
+)
+--15495
+
+--daysToGatewayInitialHRA
+,daysToGateway_cte as (
+Select distinct a.*,b.hra_Submitted_to_Gateway,b.assessmentdate,
+--date_diff(submitDateHraPlus60,dateInitialHra,DAY) as daysToGatewayInitialHRA, --column V
+
+case when assessmentdate > dateInitialHra  and 
+(assessmentDate between a.eligEffectiveDate and a.eligEndDate) and
+date_diff(b.hra_Submitted_to_Gateway,assessmentDate,DAY) <= 60 
+then dense_rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  assessmentDate) end as daysToGateway_rnk,
+--date_diff(a.hra_Submitted_to_Gateway,assessmentDate,DAY) else null end as daysToGateway 
+From 
+submitDateHraPlus60_CTE as a
+left join
+DBT_HRA_Model as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+)
+
+,daysToGateway_cte_2 as (
+Select
+memberid,eligEffectiveDate,eligEndDate,assessmentDate,hra_Submitted_to_Gateway,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by  assessmentDate desc)  as daysToGateway_rnk
+From daysToGateway_cte
+where daysToGateway_rnk is not null
+)
+
+,daysToGateway_cte_3 as (
+Select *,date_diff(hra_Submitted_to_Gateway,assessmentDate,DAY) as daysToGateway -- column W
+From daysToGateway_cte_2
+where daysToGateway_rnk = 1
+
+)
+
+
+Select distinct a.*,
+date_diff(submitDateHraPlus60,dateInitialHra,DAY) as daysToGatewayInitialHRA, --column V
+daysToGateway --column W
+From
+submitDateHraPlus60_CTE as a
+left join
+daysToGateway_cte_3 as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+
+);
+
+
+
+CREATE TEMP TABLE Outreaches_temp_table as (
+
+with outreaches_30_count as (
+
+Select a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate,
+COUNT(DISTINCT(CONCAT(b.modality, '|', b.outreachDate))) AS outreach30
+From
+reassessments as a
+join
+`cityblock-analytics.abs_client_reporting.DBT_Tufts_Outreaches_Raw_v2` as b
+on a.memberid = b.memberid
+left join
+(
+Select *
+From 
+`cityblock-analytics.mrt_commons.mrt_commons_outreach_attempt`
+where  status= 'attempt' and direction = 'outbound' 
+)as c 
+on b.patientid = c.patientid
+where
+(outreachType = 'Assessment Scheduling' and 
+(outreachDate between eligEffectiveDate and eligEffectiveDate30) and
+(outreachDate between eligEffectiveDate and eligEndDate) and
+(outreachDate <= reporting_end_date) and
+Successful = 1 ) 
+
+or
+
+(outreachType = 'Assessment Scheduling' and 
+(outreachDate between eligEffectiveDate and eligEffectiveDate30) and
+(outreachDate between eligEffectiveDate and eligEndDate) and
+(outreachDate <= reporting_end_date) and
+Successful = 0 and
+(date(c.attemptedAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate30) and
+(date(c.attemptedAt,"America/New_York") <= reporting_end_date )
+)
+Group by 
+a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate
+)
+
+
+
+--Outreaches
+,outreaches_rnk as (
+Select distinct a.memberid,a.eligEffectiveDate,a.eligEndDate,b.outreachDate,b.modality,d.outreach30 as Outreach30,
+/*
+case when 
+(outreachType = 'Assessment Scheduling' and 
+(outreachDate between eligEffectiveDate and eligEffectiveDate30) and
+(outreachDate between eligEffectiveDate and eligEndDate) and
+(outreachDate <= reporting_end_date) and
+Successful = 1 )
+or
+(outreachType = 'Assessment Scheduling' and 
+(outreachDate between eligEffectiveDate and eligEffectiveDate30) and
+(outreachDate between eligEffectiveDate and eligEndDate) and
+(outreachDate <= reporting_end_date) and
+Successful = 0 and
+(date(c.attemptedAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate30) and
+(date(c.attemptedAt,"America/New_York") <= reporting_end_date )
+)
+then 
+rank()over(partition by a.memberid,eligEffectiveDate,eligEndDate order by outreachDate) else null end as dateOutreach30_rnk,
+*/
+case when 
+outreachType = 'Assessment Scheduling' and 
+Successful = 0 and
+--safe_cast(dateReassessmentDue as date) is null and
+(outreachDate between a.eligEffectiveDate and eligEffectiveDate90) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date)
+then
+rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  outreachDate desc ) else null end as dateOutreach1_90_rnk,
+
+
+case when outreachType = 'Assessment Scheduling' and 
+Successful = 0 and
+b.modality = 'mail' and 
+--safe_cast(dateReassessmentDue as date) is null and
+(outreachDate between a.eligEffectiveDate and eligEffectiveDate90) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) 
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by outreachDate desc ) else null  end as dateMailer90_rnk,
+
+case when outreachType = 'Assessment Scheduling' and 
+Successful = 1 and
+--safe_cast(dateReassessmentDue as date) is null and
+(outreachDate between a.eligEffectiveDate and eligEffectiveDate90) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) 
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by outreachDate desc ) else null  end as dateOutreachSuccess90_rnk,
+
+
+case when outreachType = 'Assessment Scheduling' and 
+Successful = 0 and
+--safe_cast(dateReassessmentDue as date) is null and
+((outreachDate > eligEffectiveDate90) and (outreachDate <= eligEffectiveDate120)) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date)
+then
+rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  outreachDate desc ) else null end as dateOutreach1_91_120_rnk,
+
+
+case when outreachType = 'Assessment Scheduling' and 
+Successful = 1 and
+--safe_cast(dateReassessmentDue as date) is null and
+(outreachDate between eligEffectiveDate90 and eligEffectiveDate120) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) 
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by outreachDate desc ) else null  end as dateOutreachSuccess91_120_rnk,
+
+case when 
+(outreachType = 'Assessment Scheduling' and 
+Successful = 0 and 
+dateHraReassessment is null and
+safe_cast(dateReassessmentDue as date) is not null and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) and
+(outreachDate between date_sub(safe_cast(dateReassessmentDue as date),interval 90 day) and safe_cast(dateReassessmentDue as date))
+)
+or
+(
+  outreachType != 'Assessment Scheduling' and 
+safe_cast(dateReassessmentDue as date) is not null and 
+dateHraReassessment is null and
+(date(c.notesCreatedAt,"America/New_York") between a.eligEffectiveDate and safe_cast(dateReassessmentDue as date)) and 
+(date(c.notesCreatedAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+(date(c.notesCreatedAt,"America/New_York") <= reporting_end_date) and
+(outreachDate between date_sub(safe_cast(dateReassessmentDue as date),interval 90 day) and safe_cast(dateReassessmentDue as date))
+)
+/*
+or
+(
+dateHraReassessment is not null and
+dateReassessmentDue is not null
+)
+*/
+then 
+rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by outreachDate desc) else null end as dateHTR1_HraReassessment_rnk,
+
+
+
+case when outreachType = 'Assessment Scheduling' and 
+Successful = 0 and
+b.modality = 'mail' and 
+safe_cast(dateReassessmentDue as date) is not null and
+(outreachDate between a.eligEffectiveDate and safe_cast(dateReassessmentDue as date)) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) 
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by outreachDate desc ) else null  end as dateMailerHraReassessment_rnk,
+
+
+case when 
+(outreachType = 'Assessment Scheduling' and 
+Successful = 1 and
+safe_cast(dateReassessmentDue as date) is not null and
+(outreachDate between a.eligEffectiveDate and safe_cast(dateReassessmentDue as date)) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) 
+)
+or
+(
+outreachType != 'Assessment Scheduling' and 
+safe_cast(dateReassessmentDue as date) is not null and
+(outreachDate between a.eligEffectiveDate and safe_cast(dateReassessmentDue as date)) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) 
+)
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by outreachDate desc ) else null  end as dateHTRSuccessHraReassessment_rnk,
+
+
+
+case when outreachType = 'Assessment Scheduling' and 
+Successful = 0 and
+--safe_cast(dateReassessmentDue as date) is null and
+(outreachDate between date_sub(safe_cast(dateReassessmentDue as date),interval 90 day) and safe_cast(dateReassessmentDue as date)) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date)
+then
+rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  outreachDate desc ) else null end as dateOutreach1_275_365_rnk,
+
+
+
+From
+reassessments as a
+left join
+`cityblock-analytics.abs_client_reporting.DBT_Tufts_Outreaches_Raw_v2` as b 
+on 
+a.memberid = b.memberid
+left join
+(
+Select *
+From 
+`cityblock-analytics.mrt_commons.mrt_commons_outreach_attempt`
+where  status= 'attempt' and direction = 'outbound' 
+)as c 
+on b.patientid = c.patientid
+left join
+outreaches_30_count as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+)
+
+/*
+--30 day outreaches
+,dateOutreach30_cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate ) as dateOutreach30_rnk
+From 
+Outreaches_rnk
+where dateOutreach30_rnk is not null
+)
+
+
+,dateOutreach30 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_first30days_1) as outreach_first30days_1
+From
+(Select * From dateOutreach30_cte)
+PIVOT(max(outreachdate) as outreach_first30days For
+dateOutreach30_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+*/
+
+
+
+--90 day outreaches
+,dateOutreach90_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_90_rnk
+From 
+Outreaches_rnk
+where dateOutreach1_90_rnk is not null
+
+)
+
+,dateOutreach90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_first90days_3) as outreach_first90days_3,
+max(outreach_first90days_2) as outreach_first90days_2,
+max(outreach_first90days_1) as outreach_first90days_1
+From
+(Select * From dateOutreach90_cte)
+PIVOT(max(outreachdate) as outreach_first90days For
+dateOutreach1_90_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+--7282
+
+--Selecting the first 5 modalities that happened within the first 90 days of enrollment
+,dateOutreach90_modality as(
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(modality_first90days_3) as modality_first90days_3,
+max(modality_first90days_2) as modality_first90days_2,
+max(modality_first90days_1) as modality_first90days_1
+From
+(Select * From dateOutreach90_cte)
+PIVOT(max(modality) as modality_first90days For
+dateOutreach1_90_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+--7282
+
+
+
+-- 90 day mailier
+,dateMailer90_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateMailer90_rnk
+From 
+Outreaches_rnk
+where dateMailer90_rnk is not null
+
+)
+
+
+
+,dateMailer90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_mailer90days_1) as outreach_mailer90days_1
+From
+(Select * From dateMailer90_cte)
+PIVOT(max(outreachdate) as outreach_mailer90days For
+dateMailer90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+-- 90 day success
+,dateOutreachSuccess90_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreachSuccess90_rnk
+From 
+Outreaches_rnk
+where dateOutreachSuccess90_rnk is not null
+
+)
+
+,dateOutreachSuccess90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_Success90days_1) as outreach_Success90days_1
+From
+(Select * From dateOutreachSuccess90_cte)
+PIVOT(max(outreachdate) as outreach_Success90days For
+dateOutreachSuccess90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+--outreach 91 - 120 days
+,dateOutreach1_91_120_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_91_120_rnk
+From 
+Outreaches_rnk
+where dateOutreach1_91_120_rnk is not null
+
+)
+
+
+,dateOutreach1_91_120 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_91_120_days_3) as outreach_91_120_days_3,
+max(outreach_91_120_days_2) as outreach_91_120_days_2,
+max(outreach_91_120_days_1) as outreach_91_120_days_1
+From
+(Select * From dateOutreach1_91_120_cte)
+PIVOT(max(outreachdate) as outreach_91_120_days For
+dateOutreach1_91_120_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+--1087
+
+
+--Selecting the first 5 modalities that happened within 90-120 days of enrollment
+,dateOutreach1_91_120_modality as(
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(modality_91_120_days_3) as modality_91_120_days_3,
+max(modality_91_120_days_2) as modality_91_120_days_2,
+max(modality_91_120_days_1) as modality_91_120_days_1
+From
+(Select * From dateOutreach1_91_120_cte)
+PIVOT(max(modality) as modality_91_120_days For
+dateOutreach1_91_120_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+--1087
+
+
+
+,dateOutreachSuccess91_120_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreachSuccess91_120_rnk
+From 
+Outreaches_rnk
+where dateOutreachSuccess91_120_rnk is not null
+
+)
+
+
+,dateOutreachSuccess91_120 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_success91_120days_1) as outreach_success91_120days_1
+From
+(Select * From dateOutreachSuccess91_120_cte)
+PIVOT(max(outreachdate) as outreach_success91_120days For
+dateOutreachSuccess91_120_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+--HRT Reassessments
+,dateHTR1_HraReassessment_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateHTR1_HraReassessment_rnk
+From 
+Outreaches_rnk
+where dateHTR1_HraReassessment_rnk is not null
+
+)
+
+,dateHTR1_HraReassessment as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(HTR1_HraReassessment_3) as HTR1_HraReassessment_3,
+max(HTR1_HraReassessment_2) as HTR1_HraReassessment_2,
+max(HTR1_HraReassessment_1) as HTR1_HraReassessment_1
+From
+(Select * From dateHTR1_HraReassessment_cte)
+PIVOT(max(outreachdate) as HTR1_HraReassessment For
+dateHTR1_HraReassessment_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+--2894
+
+
+
+--Selecting the first 5 modalities that happened HraReassessment
+,dateHTR1_HraReassessment_modality as(
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(modality_HraReassessment_days_3) as modality_HraReassessment_days_3,
+max(modality_HraReassessment_days_2) as modality_HraReassessment_days_2,
+max(modality_HraReassessment_days_1) as modality_HraReassessment_days_1
+From
+(Select * From dateHTR1_HraReassessment_cte)
+PIVOT(max(modality) as modality_HraReassessment_days For
+dateHTR1_HraReassessment_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+--2894
+
+,dateMailerHraReassessment_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateMailerHraReassessment_rnk
+From 
+Outreaches_rnk
+where dateMailerHraReassessment_rnk is not null
+)
+
+
+,dateMailerHraReassessment as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_MailerHraReassessment_1) as outreach_MailerHraReassessment_1
+From
+(Select * From dateMailerHraReassessment_cte)
+PIVOT(max(outreachdate) as outreach_MailerHraReassessment For
+dateMailerHraReassessment_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateHTRSuccessHraReassessment_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateHTRSuccessHraReassessment_rnk
+From 
+Outreaches_rnk
+where dateHTRSuccessHraReassessment_rnk is not null
+)
+
+,dateHTRSuccessHraReassessment as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_SuccessHraReassessment_1) as outreach_SuccessHraReassessment_1
+From
+(Select * From dateHTRSuccessHraReassessment_cte)
+PIVOT(max(outreachdate) as outreach_SuccessHraReassessment For
+dateHTRSuccessHraReassessment_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+--outreaches between days 275-365
+,dateOutreach1_275_365_cte as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_275_365_rnk
+From 
+Outreaches_rnk
+where dateOutreach1_275_365_rnk is not null
+)
+
+
+
+,dateOutreach1_275_365 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_275_365_days_3) as outreach_275_365_days_3,
+max(outreach_275_365_days_2) as outreach_275_365_days_2,
+max(outreach_275_365_days_1) as outreach_275_365_days_1
+From
+(Select * From dateOutreach1_275_365_cte)
+PIVOT(max(outreachdate) as outreach_275_365_days For
+dateOutreach1_275_365_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)--2072
+
+
+--Selecting the first 5 modalities that happened within 275-365 days of enrollment
+,dateOutreach1_275_365_modality as(
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(modality_275_365_days_3) as modality_275_365_days_3,
+max(modality_275_365_days_2) as modality_275_365_days_2,
+max(modality_275_365_days_1) as modality_275_365_days_1
+From
+(Select * From dateOutreach1_275_365_cte)
+PIVOT(max(modality) as modality_275_365_days For
+dateOutreach1_275_365_rnk in (1,2,3))
+group by memberId,eligEffectiveDate,eligEndDate
+)--2072
+
+
+
+
+
+Select distinct a.memberid,a.eligEffectiveDate,a.eligEndDate,
+--outreach_first30days_1 as dateOutreach30, -- column AQ
+a.Outreach30, --column AQ
+outreach_first90days_1 as dateOutreach1_90,--column AR
+modality_first90days_1 as modalityOutreach1_90,--column AS
+outreach_first90days_2 as dateOutreach2_90,--column AT
+modality_first90days_2 as modalityOutreach2_90,--column AU
+outreach_first90days_3 as dateOutreach3_90,--column AV
+modality_first90days_3 as modalityOutreach3_90,--column AW
+outreach_mailer90days_1 as dateMailer90,--column AX
+outreach_Success90days_1 as dateOutreachSuccess90,--column AY
+outreach_91_120_days_1 as dateOutreach1_91_120,--column AZ
+modality_91_120_days_1 as modalityOutreach1_91_120,--columnn BA
+outreach_91_120_days_2 dateOutreach2_91_120,--column BB
+modality_91_120_days_2 as modalityOutreach2_91_120,--column BC
+outreach_91_120_days_3 dateOutreach3_91_120,--column BD
+modality_91_120_days_3 as modalityOutreach3_91_120,--column BE
+outreach_success91_120days_1 as dateOutreachSuccess91_120,--column BF
+HTR1_HraReassessment_1 as dateHTR1_HraReassessment,--column BG
+modality_HraReassessment_days_1 as modalityHTR1_HraReassessment,--column BH
+HTR1_HraReassessment_2 as dateHTR2_HraReassessment,--column BI
+modality_HraReassessment_days_2 as modalityHTR2_HraReassessment,--column BJ
+HTR1_HraReassessment_3 as dateHTR3_HraReassessment,--column BK
+modality_HraReassessment_days_3 as modalityHTR3_HraReassessment,--column BL
+outreach_MailerHraReassessment_1 as dateMailerHraReassessment,--column BM
+outreach_SuccessHraReassessment_1 as dateHTRSuccessHraReassessment,--column BN
+outreach_275_365_days_1 as dateOutreach1_275_365,--column BO
+modality_275_365_days_1 as modalityOutreach1_275_365,--column BP
+outreach_275_365_days_2 as dateOutreach2_275_365,--column BQ
+modality_275_365_days_2 as modalityOutreach2_275_365,--column BR
+outreach_275_365_days_3 as dateOutreach3_275_365,--column BS
+modality_275_365_days_3 as modalityOutreach3_275_365--column BT
+
+From
+outreaches_rnk as a
+/*
+left join
+dateOutreach30 as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate --and a.outreachdate = b.outreachdate
+*/
+left join
+dateOutreach90 as c 
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate --and a.outreachdate = c.outreachdate
+left join
+dateOutreach90_modality as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate --and a.outreachdate = d.outreachdate
+left join
+dateMailer90 as e
+on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate --and a.outreachdate = e.outreachdate
+left join
+dateOutreachSuccess90 as f
+on a.memberid = f.memberid and a.eligEffectiveDate = f.eligEffectiveDate and a.eligEndDate = f.eligEndDate --and a.outreachdate = e.outreachdate
+left join
+dateOutreach1_91_120 as g
+on a.memberid = g.memberid and a.eligEffectiveDate = g.eligEffectiveDate and a.eligEndDate = g.eligEndDate --and a.outreachdate = f.outreachdate
+left join
+dateOutreach1_91_120_modality as m
+on a.memberid = m.memberid and a.eligEffectiveDate = m.eligEffectiveDate and a.eligEndDate = m.eligEndDate --and a.outreachdate = f.outreachdate
+left join
+dateOutreachSuccess91_120 as h
+on a.memberid = h.memberid and a.eligEffectiveDate = h.eligEffectiveDate and a.eligEndDate = h.eligEndDate --and a.outreachdate = g.outreachdate
+left join
+dateHTR1_HraReassessment as i
+on a.memberid = i.memberid and a.eligEffectiveDate = i.eligEffectiveDate and a.eligEndDate = i.eligEndDate --and a.outreachdate = h.outreachdate
+left join
+dateMailerHraReassessment as j
+on a.memberid = j.memberid and a.eligEffectiveDate = j.eligEffectiveDate and a.eligEndDate = j.eligEndDate --and a.outreachdate = i.outreachdate
+left join
+dateHTR1_HraReassessment_modality as n
+on a.memberid = n.memberid and a.eligEffectiveDate = n.eligEffectiveDate and a.eligEndDate = n.eligEndDate --and a.outreachdate = i.outreachdate
+left join
+dateHTRSuccessHraReassessment as k
+on a.memberid = k.memberid and a.eligEffectiveDate = k.eligEffectiveDate and a.eligEndDate = k.eligEndDate --and a.outreachdate = j.outreachdate
+left join
+dateOutreach1_275_365 as l
+on a.memberid = l.memberid and a.eligEffectiveDate = l.eligEffectiveDate and a.eligEndDate = l.eligEndDate --and a.outreachdate = k.outreachdate
+left join
+dateOutreach1_275_365_modality as o
+on a.memberid = o.memberid and a.eligEffectiveDate = o.eligEffectiveDate and a.eligEndDate = o.eligEndDate --and a.outreachdate = k.outreachdate
+
+
+
+);
+
+
+--Refusals
+CREATE TEMP TABLE Refusals as (
+
+with Refusal_stg as (
+SElect a.*,b.dateofRefusal,
+
+
+case when (b.dateofRefusal between a.eligEffectiveDate and a.eligEndDate) and
+(b.dateofRefusal between date_sub(safe_cast(dateReassessmentDue as date), interval 364 day) and safe_cast(dateReassessmentDue as date)) and
+b.dateofRefusal <= reporting_end_date and
+dateHraReassessment is  null --and
+--dateHTR1_HraReassessment is null and
+--dateHTR2_HraReassessment is null and
+--dateHTR3_HraReassessment is null 
+then
+rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by b.dateofRefusal desc ) else null end as latest_refusal_rnk, --used for column AF
+
+case when b.refusalType = 'Assessment' and 
+(b.dateofRefusal between a.eligEffectiveDate and a.eligEffectiveDate90) and 
+(b.dateofRefusal between a.eligEffectiveDate and reporting_end_date) and 
+a.dateHRA90 is null and
+((a.dateInitialHra is null) or (a.dateInitialHra > eligEffectiveDate90)) and 
+--c.dateOutreach1_90 is null and
+b.dateofRefusal <= reporting_end_date then
+rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by b.dateofRefusal )else null end as dateHra90Refusal_rnk,
+
+case when b.refusalType = 'Assessment' and 
+((b.dateofRefusal > a.eligEffectiveDate90) and (b.dateofRefusal <=  eligEffectiveDate120)) and 
+(b.dateofRefusal between a.eligEffectiveDate and a.eligEndDate) and 
+b.dateofRefusal <= reporting_end_date then
+rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by b.dateofRefusal )else null end as dateHraRefusal91_120_rnk
+
+From 
+reassessments as a
+left join
+`cityblock-analytics.abs_client_reporting.DBT_Tufts_Refusals_Raw` as b
+on a.memberid = b.memberid 
+left join
+(
+Select distinct memberid,eligEffectiveDate,eligEndDate,dateHTR1_HraReassessment,dateHTR2_HraReassessment,dateHTR3_HraReassessment,dateOutreach1_90
+From 
+Outreaches_temp_table 
+)
+as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+)
+
+
+,dateHra90Refusal_stg as (
+Select distinct a.memberid,a.dateofRefusal,a.eligEffectiveDate,a.eligEndDate,b.assessmentdate,
+dense_rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal desc ) as dateHra90Refusal_rnk
+From 
+Refusal_stg as a
+left join
+DBT_HRA_Model as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+where dateHra90Refusal_rnk is not null and assessmentdate is null
+)
+
+
+
+,dateHra90Refusal as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateHra90Refusal_1) as outreach_dateHra90Refusal_1
+From
+(Select * From dateHra90Refusal_stg)
+PIVOT(max(dateofRefusal) as outreach_dateHra90Refusal For
+dateHra90Refusal_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateHraRefusal91_120_stg as (
+Select distinct a.memberid,dateofRefusal,a.eligEffectiveDate,a.eligEndDate,
+dense_rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal ) as dateHraRefusal91_120_rnk
+From 
+Refusal_stg as a
+left join
+DBT_HRA_Model as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+where dateHraRefusal91_120_rnk is not null and assessmentdate is null
+)
+
+
+
+,dateHraRefusal91_120 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateHraRefusal91_120_1) as outreach_dateHraRefusal91_120_1
+From
+(Select * From dateHraRefusal91_120_stg)
+PIVOT(max(dateofRefusal) as outreach_dateHraRefusal91_120  For
+dateHraRefusal91_120_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+,lastest_refuals_stg as (
+Select distinct a.memberid,dateofRefusal,a.eligEffectiveDate,a.eligEndDate,
+dense_rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal desc ) as latest_refusal_rnk
+From 
+Refusal_stg as a
+left join
+DBT_HRA_Model as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+where latest_refusal_rnk is not null and assessmentdate is not null
+)
+
+
+
+,lastest_refuals as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_lastest_refuals_1) as outreach_lastest_refuals_1
+From
+(Select * From lastest_refuals_stg)
+PIVOT(max(dateofRefusal) as outreach_lastest_refuals  For
+latest_refusal_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+
+, refusals_combined as (
+Select distinct  a.*,e.dateHTR1_HraReassessment,e.dateHTR2_HraReassessment,e.dateHTR3_HraReassessment,e.dateOutreach1_90,
+case when (b.outreach_dateHra90Refusal_1 between a.eligEffectiveDate and a.eligEndDate) then b.outreach_dateHra90Refusal_1 else null end as dateHra90Refusal,--column X
+case when (c.outreach_dateHraRefusal91_120_1 between a.eligEffectiveDate and a.eligEndDate) then c.outreach_dateHraRefusal91_120_1 else null end as dateHraRefusal91_120, --column AB
+case when (d.outreach_lastest_refuals_1 between a.eligEffectiveDate and a.eligEndDate) then d.outreach_lastest_refuals_1 else null end as dateHraReassessmentRefusal --column AF
+From 
+reassessments as a
+left join 
+dateHra90Refusal as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate --and a.assessmentDate = b.assessmentDate
+left join 
+dateHraRefusal91_120 as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate --and a.assessmentDate = c.assessmentDate
+left join
+lastest_refuals as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate --and a.assessmentDate = d.assessmentDate
+left join
+(
+Select distinct memberid,eligEffectiveDate,eligEndDate,dateHTR1_HraReassessment,dateHTR2_HraReassessment,dateHTR3_HraReassessment,dateOutreach1_90
+From 
+Outreaches_temp_table 
+)as e
+on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
+)
+
+
+
+,refusals_combined_pt2 as (
+Select distinct a.*,
+
+case when (date(b.createdAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate90) and
+generatedBy = 'skedulo' and 
+(date(b.appointmentAt,"America/New_York") > eligEffectiveDate90) and
+dateHRA90 is null and 
+((dateInitialHra is null) or (dateInitialHra > eligEffectiveDate90)) --and 
+--dateOutreach1_90 is null
+--then date(b.createdAt,"America/New_York") else null end as dateAppointment90plusHra90,--column AA
+then rank()over(partition by a.memberid,eligEffectiveDate,eligEndDate order by b.createdAt desc ) else null end as dateAppointment90plusHra90_rnk,
+
+
+case when (date(b.createdAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate120) and
+generatedBy = 'skedulo' and 
+(date(b.appointmentAt,"America/New_York") > eligEffectiveDate120) 
+--then date(b.createdAt,"America/New_York") else null end as dateHraAppointment120plus91_120, -- column AE
+then rank()over(partition by a.memberid,eligEffectiveDate,eligEndDate order by b.createdAt desc ) else null end as dateHraAppointment120plus91_120_rnk,
+
+
+case when (date(b.createdAt,"America/New_York") between eligEffectiveDate and eligEndDate) and 
+generatedBy = 'skedulo' and 
+date(b.createdAt,"America/New_York") > safe_cast(dateReassessmentDue as date)  and
+dateHraReassessment is null and
+dateHTR1_HraReassessment is null and
+dateHTR2_HraReassessment is null and
+dateHTR3_HraReassessment is null
+then rank()over(partition by a.memberid,eligEffectiveDate,eligEndDate order by b.createdAt desc ) else null end as dateAppointmentplusHraReassessment_rnk,
+
+b.createdAt
+From 
+refusals_combined as a
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.appointments_info` 
+Where apptTypeGrouped = 'Assessment'
+)as b 
+on a.patientid = b.patientId --and a.assessmentdate = date(b.createdAt,"America/New_York")
+)
+
+
+
+
+,dateAppointment90plusHra90_stg as (
+Select memberid,createdAt,eligEffectiveDate,eligEndDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt desc ) as dateAppointment90plusHra90_rnk
+From 
+refusals_combined_pt2
+where dateAppointment90plusHra90_rnk is not null
+)
+
+
+
+,dateAppointment90plusHra90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateAppointment90plusHra_1) as outreach_dateAppointment90plusHra_1
+From
+(Select * From dateAppointment90plusHra90_stg)
+PIVOT(max(createdAt) as outreach_dateAppointment90plusHra  For
+dateAppointment90plusHra90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+,dateHraAppointment120plus91_120_stg as (
+Select memberid,createdAt,eligEffectiveDate,eligEndDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdat desc ) as dateHraAppointment120plus91_120_rnk
+From 
+refusals_combined_pt2
+where dateHraAppointment120plus91_120_rnk is not null
+)
+
+
+
+,dateHraAppointment120plus91_120 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateHraAppointment120plus91_120_1) as outreach_dateHraAppointment120plus91_120_1
+From
+(Select * From dateHraAppointment120plus91_120_stg)
+PIVOT(max(createdAt) as outreach_dateHraAppointment120plus91_120 For
+dateHraAppointment120plus91_120_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateAppointmentplusHraReassessment_stg as (
+Select memberid,createdAt,eligEffectiveDate,eligEndDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdat desc ) as dateAppointmentplusHraReassessment_rnk
+From 
+refusals_combined_pt2
+where dateAppointmentplusHraReassessment_rnk is not null
+)
+
+,dateAppointmentplusHraReassessment as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateAppointmentplusHraReassessment_1) as outreach_dateAppointmentplusHraReassessment_1
+From
+(Select * From dateAppointmentplusHraReassessment_stg)
+PIVOT(max(createdAt) as outreach_dateAppointmentplusHraReassessment For
+dateAppointmentplusHraReassessment_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+Select distinct a.* except(dateAppointment90plusHra90_rnk,dateHraAppointment120plus91_120_rnk,createdAt,dateAppointmentplusHraReassessment_rnk,dateHTR1_HraReassessment,dateHTR2_HraReassessment,dateHTR3_HraReassessment,dateOutreach1_90),
+date(c.outreach_dateAppointment90plusHra_1,"America/New_York" ) as dateAppointment90plusHra90,--column AA
+date(d.outreach_dateHraAppointment120plus91_120_1,"America/New_York")as dateHraAppointment120plus91_120,--column AB
+date(e.outreach_dateAppointmentplusHraReassessment_1,"America/New_York") as dateAppointmentplusHraReassessment,--column AI
+b.* except(memberid,eligEffectiveDate,eligEndDate)
+From 
+refusals_combined_pt2 as a
+left join
+Outreaches_temp_table as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+left join
+dateAppointment90plusHra90 as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+left join
+dateHraAppointment120plus91_120 as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+left join
+dateAppointmentplusHraReassessment as e
+on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
+
+);
+--14153
+
+
+
+--No shows
+--There may be more than one no show that meets the criteria, should we only select the latest to get rid of multiple rows for the same member?
+CREATE TEMP TABLE No_Shows as (
+
+with dateApptNoShow_stg as (
+Select a.*,b.ApptNoShowDate,
+
+case when 
+assessmentDate is null and (ApptNoShowDate between a.eligEffectiveDate and a.eligEffectiveDate90) 
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by ApptNoShowDate desc ) else null end as dateApptNoShowHra90_rnk, -- column Y 
+
+case when 
+assessmentDate is null and ((ApptNoShowDate > a.eligEffectiveDate90) and  (ApptNoShowDate < a.eligEffectiveDate120)) 
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by ApptNoShowDate desc ) else null end as dateHraApptNoShow91_120_rnk, -- column AC
+
+case when 
+assessmentDate is null and (ApptNoShowDate between date_sub(safe_cast(dateReassessmentDue as date), interval 90 day) and safe_cast(dateReassessmentDue as date)) and
+dateHraReassessment is null and
+dateHTR1_HraReassessment is null and
+dateHTR2_HraReassessment is null and 
+dateHTR3_HraReassessment is null
+then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by ApptNoShowDate desc ) else null end as dateApptNoShowHraReassessment_rnk -- column AG
+
+From
+Refusals as a
+left join 
+`cityblock-analytics.abs_client_reporting.DBT_Tufts_AssessmentAppointmentNoShow` as b
+on a.memberid = b.memberid
+left join
+DBT_HRA_Model as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+)
+
+,dateApptNoShowHra90_stg as (
+Select distinct memberid,eligEffectiveDate,eligEndDate,ApptNoShowDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateApptNoShowHra90_rnk
+From 
+dateApptNoShow_stg
+where dateApptNoShowHra90_rnk is not null
+)
+
+
+,dateApptNoShowHra90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateApptNoShowHra90_1) as outreach_dateApptNoShowHra90_1
+From
+(Select * From dateApptNoShowHra90_stg)
+PIVOT(max(ApptNoShowDate) as outreach_dateApptNoShowHra90 For
+dateApptNoShowHra90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateHraApptNoShow91_120_stg as (
+Select memberid,eligEffectiveDate,eligEndDate,ApptNoShowDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateHraApptNoShow91_120_rnk
+From 
+dateApptNoShow_stg
+where dateHraApptNoShow91_120_rnk is not null
+)
+
+
+,dateHraApptNoShow91_120 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateHraApptNoShow91_120_1) as outreach_dateHraApptNoShow91_120_1
+From
+(Select * From dateHraApptNoShow91_120_stg)
+PIVOT(max(ApptNoShowDate) as outreach_dateHraApptNoShow91_120 For
+dateHraApptNoShow91_120_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateApptNoShowHraReassessment_stg as (
+Select memberid,eligEffectiveDate,eligEndDate,ApptNoShowDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateApptNoShowHraReassessment_rnk
+From 
+dateApptNoShow_stg
+where dateHraApptNoShow91_120_rnk is not null
+)
+
+
+,dateApptNoShowHraReassessment as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_dateApptNoShowHraReassessment_1) as outreach_dateApptNoShowHraReassessment_1
+From
+(Select * From dateApptNoShowHraReassessment_stg)
+PIVOT(max(ApptNoShowDate) as outreach_dateApptNoShowHraReassessment For
+dateApptNoShowHraReassessment_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateApptNoShow as (
+Select distinct a.*except(dateApptNoShowHra90_rnk,dateHraApptNoShow91_120_rnk,dateApptNoShowHraReassessment_rnk,ApptNoShowDate),
+b.outreach_dateApptNoShowHra90_1 as dateApptNoShowHra90,--column Y
+c.outreach_dateHraApptNoShow91_120_1 as dateHraApptNoShow91_120,--column AC
+d.outreach_dateApptNoShowHraReassessment_1 as dateApptNoShowHraReassessment--column AG
+From
+dateApptNoShow_stg as a 
+left join
+dateApptNoShowHra90 as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+left join
+dateHraApptNoShow91_120 as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+left join
+dateApptNoShowHraReassessment as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+)
+
+
+
+
+
+Select *,
+case when 
+(dateApptNoShowHra90 between eligEffectiveDate and eligEffectiveDate90) and
+(dateOutreach1_90 between dateApptNoShowHra90 and eligEffectiveDate90) and
+((dateOutreachSuccess90 is null) or (dateOutreachSuccess90 <= dateApptNoShowHra90)) and
+dateHRA90 is null and
+((dateInitialHra is null) or (dateInitialHra > eligEffectiveDate90)) and
+dateOutreach1_90 is null
+then dateApptNoShowHra90 end as dateRefusalNoShowHra90,--column Z
+
+case when 
+(dateHraApptNoShow91_120 between eligEffectiveDate90 and eligEffectiveDate120) and
+(dateOutreach1_91_120 between dateHraApptNoShow91_120 and eligEffectiveDate120) and
+((dateOutreachSuccess91_120 is null) or (dateOutreachSuccess91_120 <= dateHraApptNoShow91_120))
+then dateApptNoShowHra90 end as dateHraRefusalNoShow91_120,--column AD
+
+case when
+dateApptNoShowHraReassessment is not null and
+(dateOutreach1_275_365 >= dateApptNoShowHraReassessment) and 
+((dateHTRSuccessHraReassessment is null) or (dateHTRSuccessHraReassessment < dateApptNoShowHraReassessment))and
+dateHraReassessment is null and
+dateHTR1_HraReassessment is null and
+dateHTR2_HraReassessment is null and
+dateHTR3_HraReassessment is null
+then dateApptNoShowHraReassessment end as dateRefusalNoShowHraReassessment--column AH
+
+From
+dateApptNoShow
+
+);
+
+
+
+--Care Plans
+CREATE TEMP TABLE Care_Plans as (
+with Care_Plans_rnk as (
+Select distinct a.memberId,a.eligEffectiveDate,a.eligEndDate,assessmentId,a.patientid,a.eligEffectiveDate90,b.patientAnswerCreatedAt as ltss_date,
+
+case when assessmentSlug = 'long-term-services-coordinator-screening-tool' and 
+date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and eligEffectiveDate90 and
+date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and eligEndDate and
+date(b.patientAnswerCreatedAt,"America/New_York") <= reporting_end_date then
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by b.patientAnswerCreatedAt ) end as dateLtssOffer90_rnk,
+
+case when 
+(assessmentSlug = 'long-term-services-coordinator-screening-tool' and 
+date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and date_add(current_HRA_Date, interval 7 day)) 
+
+or
+
+(assessmentSlug = 'long-term-services-coordinator-screening-tool' and
+date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and reporting_end_date) then
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by b.patientAnswerCreatedAt ) end as dateLtssOfferReportingPeriod_rnk,
+
+case when assessmentSlug = 'ltss-initial-referral-tracking-screening-tool' and 
+date(b.submissionCompletedAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate90 and
+date(b.submissionCompletedAt,"America/New_York") between eligEffectiveDate and eligEndDate and
+date(b.submissionCompletedAt,"America/New_York") <= reporting_end_date then
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by b.submissionCompletedAt ) end as dateLtssReferral90_rnk,
+
+
+From
+No_Shows as a
+left join
+`cityblock-analytics.mrt_commons.questions_answers_all` as b
+on a.patientid = b.patientid --and date(b.submissionCreatedAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate
+)
+
+
+,dateLtssOffer90_cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,ltss_date,assessmentId,eligEffectiveDate90,patientid,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date asc ) as dateLtssOffer90_rnk
+From 
+Care_Plans_rnk
+where dateLtssOffer90_rnk is not null
+)
+
+
+,dateLtssOffer90_stg as (
+Select memberId,eligEffectiveDate,eligEndDate,assessmentId,eligEffectiveDate90,patientid,ltss_date
+From dateLtssOffer90_cte
+where dateLtssOffer90_rnk = 1 
+)--4077
+
+,dateLtssOffer90_stg2 as (
+Select a.*,date(a.ltss_date,"America/New_York") as dateLtssOffer90,--column BU
+b.answertext as Q1LtssOffer90,--column BV
+c.answertext as Q2LtssOffer90--column BW
+From 
+dateLtssOffer90_stg as a
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questionSlug = 'would-you-like-the-ltsc-to-be-present-during-your-initial-assessment'
+) as b
+on a.assessmentId = b.assessmentId
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questionSlug = 'would-you-like-a-long-term-services-coordinator'
+) as c
+on a.assessmentId = c.assessmentId
+)
+
+,dateLtssOffer90_stg3 as (
+Select a.*,b.startdate as rating_category_start_date,c.startdate as rating_Category_LtssOffer_start,
+b.category as ratingCategory90,
+c.category as ratingCategoryLtssOffer90,
+rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by b.startdate ) as ratingCategory90_rnk,
+rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by c.startDate desc ) as ratingCategoryLtssOffer90_rnk
+From 
+dateLtssOffer90_stg2 as a
+left join
+ `cityblock-analytics.abs_member.historical_rating_category` as b
+ on a.patientid = b.patientId and (b.startdate between a.eligEffectiveDate and a.eligEffectiveDate90) --between b.startDate and b.endDate
+left join
+ `cityblock-analytics.abs_member.historical_rating_category` as c
+ on a.patientid = c.patientId and (c.startdate between a.eligEffectiveDate and date(a.ltss_date,"America/New_York") )
+)
+
+,ratingCategory90_stg as (
+Select memberid,eligEffectiveDate,eligEndDate,ratingCategory90,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by rating_category_start_date desc ) as ratingCategory90_rnk
+From 
+dateLtssOffer90_stg3
+where ratingCategory90_rnk is not null
+)
+
+
+,ratingCategory90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_ratingCategory90_1) as outreach_ratingCategory90_1
+From
+(Select * From ratingCategory90_stg)
+PIVOT(max(ratingCategory90) as outreach_ratingCategory90 For
+ratingCategory90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,ratingCategoryLtssOffer90_stg as (
+Select memberid,eligEffectiveDate,eligEndDate,ratingCategoryLtssOffer90,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by rating_Category_LtssOffer_start desc ) as ratingCategoryLtssOffer90_rnk
+From 
+dateLtssOffer90_stg3
+where ratingCategoryLtssOffer90_rnk is not null
+)
+
+
+,ratingCategoryLtssOffer90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_ratingCategoryLtssOffer90_1) as outreach_ratingCategoryLtssOffer90_1
+From
+(Select * From ratingCategoryLtssOffer90_stg)
+PIVOT(max(ratingCategoryLtssOffer90) as outreach_ratingCategoryLtssOffer90 For
+ratingCategoryLtssOffer90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+,dateLtssOffer90 as (
+Select a.*,
+b.outreach_ratingCategory90_1 as ratingCategory90,--column BX
+c.outreach_ratingCategoryLtssOffer90_1 as ratingCategoryLtssOffer90--column BY
+From 
+dateLtssOffer90_stg2 as a
+left join
+ratingCategory90 as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+left join
+ratingCategoryLtssOffer90 as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+) --4077
+
+
+
+,dateLtssOfferReportingPeriod_cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,ltss_date,assessmentId,patientid,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date desc ) as dateLtssOfferReportingPeriod_rnk
+From 
+Care_Plans_rnk
+where dateLtssOfferReportingPeriod_rnk is not null
+)
+
+,dateLtssOfferReportingPeriod_stg as (
+Select memberId,eligEffectiveDate,eligEndDate,assessmentId,ltss_date,patientid
+From dateLtssOfferReportingPeriod_cte
+where dateLtssOfferReportingPeriod_rnk = 1 
+)--370
+
+
+
+,dateLtssOfferReportingPeriod_stg_2 as (
+
+Select a.*,
+date(a.ltss_date,"America/New_York") as dateLtssOfferReportingPeriod,--column BX
+b.answertext as Q1LtssOfferReportingPeriod,--column CC
+c.answertext as Q2LtssOfferReportingPeriod,--coluumn CA
+From 
+dateLtssOfferReportingPeriod_stg as a
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questionSlug = 'would-you-like-the-ltsc-to-be-present-during-your-initial-assessment'
+) as b
+on a.assessmentId = b.assessmentId
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questionSlug = 'would-you-like-a-long-term-services-coordinator'
+) as c
+on a.assessmentId = c.assessmentId
+)
+
+
+,dateLtssOfferReportingPeriod_stg_3 as (
+Select a.*,b.category as ratingCategoryLtssOfferReportingPeriod,
+rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date desc ) as ratingCategoryLtssOfferReportingPeriod_rnk
+From 
+dateLtssOfferReportingPeriod_stg_2 as a
+left join
+ `cityblock-analytics.abs_member.historical_rating_category` as b
+ on a.patientid = b.patientId and date(a.ltss_date,"America/New_York") between b.startDate and b.endDate
+)
+
+
+
+
+,ratingCategoryLtssOfferReportingPeriod_stg as (
+Select memberid,eligEffectiveDate,eligEndDate,ratingCategoryLtssOfferReportingPeriod,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date desc ) as ratingCategoryLtssOfferReportingPeriod_rnk
+From 
+dateLtssOfferReportingPeriod_stg_3
+where ratingCategoryLtssOfferReportingPeriod_rnk is not null
+)
+
+
+,ratingCategoryLtssOfferReportingPeriod as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_ratingCategoryLtssOfferReportingPeriod_1) as outreach_ratingCategoryLtssOfferReportingPeriod_1
+From
+(Select * From ratingCategoryLtssOfferReportingPeriod_stg)
+PIVOT(max(ratingCategoryLtssOfferReportingPeriod) as outreach_ratingCategoryLtssOfferReportingPeriod
+For ratingCategoryLtssOfferReportingPeriod_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+,dateLtssOfferReportingPeriod as (
+Select a.*,
+b.outreach_ratingCategoryLtssOfferReportingPeriod_1 as ratingCategoryLtssOfferReportingPeriod,--column CB
+From 
+dateLtssOfferReportingPeriod_stg_2 as a
+left join
+ratingCategoryLtssOfferReportingPeriod as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+) 
+
+
+
+,dateLtssReferral90_cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,ltss_date,assessmentId,patientid,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date desc ) as dateLtssReferral90_rnk
+From 
+Care_Plans_rnk
+where dateLtssReferral90_rnk is not null
+)
+
+
+,dateLtssReferral90_stg as (
+Select memberId,eligEffectiveDate,eligEndDate,assessmentId,ltss_date,patientid
+From dateLtssReferral90_cte
+where dateLtssReferral90_rnk = 1 
+)--767
+
+
+,dateLtssReferral90_stg2 as (
+Select a.*,date(a.ltss_date,"America/New_York") as dateLtssReferral90,--column CC
+b.answertext as reasonLtssReferral90,
+From 
+dateLtssReferral90_stg as a
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questiontext = 'Reason for Referral to LTSC:' --and assessmentid = 'daa4bbd5-f6c2-4cca-bc14-28988ecc854c'
+) as b
+on a.assessmentId = b.assessmentId
+)
+
+
+
+,dateLtssReferral90_stg3 as (
+Select a.*,b.category as ratingCategoryLtssReferral90,
+rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date desc ) as ratingCategoryLtssReferral90_rnk
+From 
+dateLtssReferral90_stg2 as a
+left join
+ `cityblock-analytics.abs_member.historical_rating_category` as b
+ on a.patientid = b.patientId and date(a.ltss_date,"America/New_York") between b.startDate and b.endDate
+)
+
+
+,ratingCategoryLtssReferral90_stg as (
+Select memberid,eligEffectiveDate,eligEndDate,ratingCategoryLtssReferral90,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_date desc ) as ratingCategoryLtssReferral90_rnk
+From 
+dateLtssReferral90_stg3
+where ratingCategoryLtssReferral90_rnk is not null
+)
+
+
+,ratingCategoryLtssReferral90 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_ratingCategoryLtssReferral90_1) as outreach_ratingCategoryLtssReferral90_1
+From
+(Select * From ratingCategoryLtssReferral90_stg)
+PIVOT(max(ratingCategoryLtssReferral90) as outreach_ratingCategoryLtssReferral90
+For ratingCategoryLtssReferral90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+,dateLtssReferral90 as (
+Select a.*,
+b.outreach_ratingCategoryLtssReferral90_1 as ratingCategoryLtssReferral90,--column CE
+From 
+dateLtssReferral90_stg2 as a
+left join
+ratingCategoryLtssReferral90 as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+) 
+
+
+
+
+
+--90 day encounter criteria 1
+,criteria1_1 as (
+Select distinct a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate,a.eligEffectiveDate90,b.assessmentid
+From 
+No_Shows as a
+join
+(
+Select distinct assessmentid,patientid
+from 
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+where questionText ='Is this an initial or annual LTSS assessment?' and answertext in ('Initial Assessment','Annual Assessment')
+)
+ as b
+ on a.patientid = b.patientid
+)--1152
+
+
+,criteria1 as (
+Select distinct a.*,cast(b.answervalue as timestamp) as ltss_encounter_date
+From
+criteria1_1 as a
+join
+(Select distinct assessmentid, answervalue
+from
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+where questionText = 'Date of Initial LTSS Assessment:' and answervalue is not null
+) as b
+on a.assessmentid = b.assessmentid
+)--1102
+
+--90 day encounter criteria 2
+
+,criteria2_1 as (
+Select distinct a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate,a.eligEffectiveDate90,b.assessmentid
+From 
+No_Shows as a
+join
+(
+Select distinct assessmentid,patientid
+from 
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+where questionText ='Is this an initial or annual LTSS assessment?' and answertext in ('Member declined assessment','LTSS case closure')
+)
+ as b
+ on a.patientid = b.patientid
+)--659
+
+
+,criteria2_2 as (
+Select distinct a.*
+From
+criteria2_1 as a
+join
+(Select distinct assessmentid, answervalue
+from
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+where questionText = 'Reason for LTSS Case closure:' and answerText = 'Member declined LTSC'
+) as b
+on a.assessmentid = b.assessmentid
+)--260
+
+,criteria2 as (
+
+Select a.*,cast(b.answervalue as timestamp) as ltss_encounter_date
+From
+criteria2_2 as a
+join
+(
+Select distinct assessmentid, answervalue
+from
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+where questionText = 'Date of LTSS Case Closure:' and answervalue is not null
+) as b
+on a.assessmentid = b.assessmentid
+)--260
+
+, combined_encouter_criterias as(
+Select a.*
+From 
+criteria1 as a
+
+union distinct
+
+Select b.*
+From 
+criteria2 as b
+)
+
+, rank_encounter_critera as (
+Select a.*,
+case when 
+(date(ltss_encounter_date,"America/New_York") between eligEffectiveDate and eligEffectiveDate90) and
+(date(ltss_encounter_date,"America/New_York") between eligEffectiveDate and eligEndDate) and
+(date(ltss_encounter_date,"America/New_York") <= reporting_end_date) then
+rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_encounter_date desc ) end as encounter_date_rnk
+
+From 
+combined_encouter_criterias as a
+)
+
+,rank_encounter_critera_cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,date(ltss_encounter_date,"America/New_York") as ltss_encounter_date ,assessmentId,patientid,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_encounter_date desc )  as encounter_date_rnk
+From 
+rank_encounter_critera
+where encounter_date_rnk is not null
+)
+
+
+,rank_encounter_critera_stg as (
+Select memberId,eligEffectiveDate,eligEndDate,assessmentId,ltss_encounter_date,patientid
+From rank_encounter_critera_cte
+where encounter_date_rnk = 1 
+)--203
+
+
+,dateLtssEncounter90_stg as (
+
+Select a.*,ltss_encounter_date as dateLtssEncounter90,--column CF
+b.answertext as typeLtssEncounter90,--column CG
+c.answertext as closeReasonLtssEncounter90--column CH
+From 
+rank_encounter_critera_stg as a
+left join
+(
+Select *
+From
+`cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questiontext = 'Is this an initial or annual LTSS assessment?'
+) as b
+on a.assessmentId = b.assessmentId
+left join
+(
+  Select *
+  From
+  `cityblock-analytics.mrt_commons.questions_answers_all` 
+Where questiontext = 'Reason for LTSS Case closure:'
+) as c
+on a.assessmentid = c.assessmentid
+)--203 
+
+
+,dateLtssEncounter90_stg2 as (
+Select a.*,b.category as ratingCategoryEncounter90,
+rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_encounter_date desc ) as dateLtssEncounter90_rnk
+From 
+dateLtssEncounter90_stg as a
+left join
+ `cityblock-analytics.abs_member.historical_rating_category` as b
+ on a.patientid = b.patientId and ltss_encounter_date between b.startDate and b.endDate
+)
+
+
+,dateLtssEncounter90_stg_3 as (
+Select memberid,eligEffectiveDate,eligEndDate,ratingCategoryEncounter90,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ltss_encounter_date desc ) as dateLtssEncounter90_rnk
+From 
+dateLtssEncounter90_stg2
+where dateLtssEncounter90_rnk is not null
+)
+
+
+,dateLtssEncounter90_stg_4 as (
+SELECT
+memberId,eligEffectiveDate,eligEndDate,
+max(outreach_ratingCategoryEncounter90_1) as outreach_ratingCategoryEncounter90_1
+From
+(Select * From dateLtssEncounter90_stg_3)
+PIVOT(max(ratingCategoryEncounter90) as outreach_ratingCategoryEncounter90
+For dateLtssEncounter90_rnk in (1))
+group by memberId,eligEffectiveDate,eligEndDate
+)
+
+
+
+,dateLtssEncounter90 as (
+Select a.*,
+b.outreach_ratingCategoryEncounter90_1 as ratingCategoryEncounter90,--column CI
+From 
+dateLtssEncounter90_stg as a
+left join
+dateLtssEncounter90_stg_4 as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+) 
+
+
+
+, final_table_stg as (
+Select a.*,b.dateLtssOffer90,b.Q1LtssOffer90,b.Q2LtssOffer90,b.ratingCategory90,b.ratingCategoryLtssOffer90,
+c.dateLtssOfferReportingPeriod,c.Q1LtssOfferReportingPeriod,c.Q2LtssOfferReportingPeriod,c.ratingCategoryLtssOfferReportingPeriod,
+d.dateLtssReferral90,d.reasonLtssReferral90,d.ratingCategoryLtssReferral90,
+e.dateLtssEncounter90,e.typeLtssEncounter90,e.closeReasonLtssEncounter90,e.ratingCategoryEncounter90
+
+From 
+No_Shows as a
+left join
+dateLtssOffer90 as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+left join
+dateLtssOfferReportingPeriod as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+left join
+dateLtssReferral90 as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+left join 
+dateLtssEncounter90 as e
+on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
+)
+
+
+,ltssCoordinator_stg as (
+Select patientId, providername, provider_updatedAt,--max(provider_updatedAt) as provider_updatedAt,
+dense_rank()over(partition by  patientId order by provider_updatedAt desc ) as rnk
+From
+`cityblock-analytics.mrt_commons.member_external_care_team` 
+Where providerRole in ('longTermServicesAndSupportsCoordinator','LTC','LTSC')
+)
+
+, ltssCoordinator as (
+Select distinct a.memberid,a.eligEffectiveDate,a.eligEndDate,a.dateHraReportingPeriod,
+
+case when 
+--(a.dateInitialHra != a.dateHraReportingPeriod)and 
+dateHraReportingPeriod is not null and 
+(
+(date(b.provider_updatedAt,"America/New_York") <= a.dateHraReportingPeriod) or 
+(date(b.provider_updatedAt,"America/New_York") between a.eligEffectiveDate and  a.dateHraReportingPeriod)
+)
+then providerName end as ltssCareTeamNameHraReportingPeriod,--column CK
+
+date(b.provider_updatedAt,"America/New_York")  as dateLtssCareTeamNameHraReportingPeriod,--column CL
+
+FROM 
+final_table_stg as a
+join
+(
+Select *
+From
+ltssCoordinator_stg
+where rnk = 1
+)as b
+on a.patientid = b.patientId and (date(provider_updatedAt,"America/New_York") <= a.dateHraReportingPeriod )
+)
+
+
+
+Select distinct a.*,b.ltssCareTeamNameHraReportingPeriod,b.dateLtssCareTeamNameHraReportingPeriod
+From 
+final_table_stg as a
+left join
+ltssCoordinator as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate and a.dateHraReportingPeriod = b.dateHraReportingPeriod
+);
+
+
+--Consent
+CREATE TEMP TABLE Consent as (
+
+with consent_rnk as (
+Select a.patientid,a.eligEffectiveDate,a.eligEndDate,a.memberid,b.createdAt,
+
+case when
+(
+b.filename = 'treatmentConsent' and 
+a.dateHRA90 is null and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEffectiveDate90) and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.createdAt,"America/New_York") <= reporting_end_date) )
+
+or
+(
+b.filename = 'treatmentConsent' and 
+a.dateHRA90 is not null and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and date_add(a.eligEffectiveDate90,interval 7 day)) and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.createdAt,"America/New_York") <= reporting_end_date) )
+
+then rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt desc ) end as dateWrittenConsent90_rnk
+
+From
+Care_Plans as a 
+join
+(
+Select *
+From
+ `commons-production.federated.patient_document` 
+ Where filename in ('treatmentConsent')
+)as b
+ on a.patientid = b.patientid and date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate
+)
+
+
+,verbal_consent_rnk as (
+Select a.patientid,a.eligEffectiveDate,a.eligEndDate,a.memberid,b.createdAt,
+case when
+(
+b.type = 'verbalAgreement' and 
+a.dateHRA90 is null and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEffectiveDate90) and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.createdAt,"America/New_York") <= reporting_end_date) )
+
+or
+
+(
+b.type = 'verbalAgreement' and 
+a.dateHRA90 is not null and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and date_add(a.eligEffectiveDate90,interval 7 day)) and 
+(date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.createdAt,"America/New_York") <= reporting_end_date) )
+
+then rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt desc ) end as dateVerbalConsent90_rnk
+
+From 
+Care_Plans as a 
+join
+(
+Select *
+From
+`cityblock-analytics.commons.patient_attribute`
+where type = 'verbalAgreement'
+) as b
+ on a.patientid = b.patientid and date(b.createdAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate
+)
+
+
+
+
+,dateWrittenConsent90_cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,date(createdAt,"America/New_York") as dateWrittenConsent90, patientid,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt )  as dateWrittenConsent90_rnk
+From 
+consent_rnk
+where dateWrittenConsent90_rnk is not null
+)
+
+
+,dateWrittenConsent90_stg as (
+Select memberId,eligEffectiveDate,eligEndDate,dateWrittenConsent90,patientid
+From dateWrittenConsent90_cte
+where dateWrittenConsent90_rnk = 1 
+)
+
+
+
+
+,dateVerbalConsent90cte as (
+
+Select distinct memberid,eligEffectiveDate,eligEndDate,date(createdAt,"America/New_York") as dateVerbalConsent90, patientid,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt )  as dateVerbalConsent90_rnk
+From 
+verbal_consent_rnk
+where dateVerbalConsent90_rnk is not null
+)
+
+
+,dateVerbalConsent90_stg as (
+Select memberId,eligEffectiveDate,eligEndDate,dateVerbalConsent90,patientid
+From dateVerbalConsent90cte
+where dateVerbalConsent90_rnk = 1 
+)
+
+, consent_stg as (
+Select a.*,
+b.dateWrittenConsent90,--column CM
+c.dateVerbalConsent90 --column CN
+From
+Care_Plans as a 
+left join
+dateWrittenConsent90_stg as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+left join
+dateVerbalConsent90_stg as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+)
+
+
+Select *,
+case when dateWrittenConsent90 is not null or dateVerbalConsent90 is not null then 'Yes' else 'No' end as flagConsent90--column CO
+From
+consent_stg
+);
+
+
+
+--Care Plan Discussion DBT Model
+CREATE TEMP TABLE Care_Plan_Discussion_Model as (
+
+with Goals_tasks as (
+Select a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate,b.goalId,b.goalLabel,b.goalTitle,b.goalCreatedAt as goalCreatedDate,b.goalCompletedAt,b.archivedAt as goalArchivedAt
+From
+Consent as a
+join
+`cityblock-analytics.mrt_commons.member_goals_tasks_all` as b
+on a.patientid = b.patientid
+where goalCreatedAt is not null and isDeletedGoal=false and         
+goalLabel not in ('Engagement','Workflow')
+
+) 
+
+, criteria as (
+Select distinct a.patientid, a.eligEffectiveDate,a.eligEndDate,b.id as idCPModal,b.wasMemberInvolved,b.updateReason,b.allMemberNeedsAddressed,b.createdAt as dateCPModal,
+case when  b.createdAt  >= a.goalCreatedDate then 1 else 0 end as Criteria1,
+case when (b.createdAt  <= a.goalCompletedAt) or (a.goalCompletedAt is null) then 1 else 0 end as Criteria2,
+case when (b.createdAt  <= a.goalArchivedAt) or (a.goalArchivedAt) is null then 1 else 0 end as Criteria3
+From 
+Goals_tasks as a
+left join
+`cityblock-analytics.commons.action_plan_update` as b
+on a.patientid = b.patientid
+)
+
+, minimum_modal_date as (
+SElect distinct *,
+dense_RANK() OVER (PARTITION BY patientid ORDER BY dateCPModal ASC) AS finish_rank
+From criteria
+where Criteria1 = 1 and Criteria2  = 1 and criteria3 = 1
+order by patientid,dateCPModal
+)
+
+, modal_final as (
+Select distinct * except(Criteria1,Criteria2,Criteria3,finish_rank)
+From minimum_modal_date
+where finish_rank = 1
+)
+
+
+Select distinct a.*,b.dateCPModal,b.wasMemberInvolved,b.updateReason,b.allMemberNeedsAddressed,b.idCPModal,
+
+case when 
+dateCPModal is not null then
+date_diff(dateCPModal,goalCreatedDate,day) end as daysGoalToModal,
+
+'modalIdentificationType' as Time_bound
+From 
+Goals_tasks as a
+join
+(
+Select *
+From
+modal_final 
+)
+as b
+on a.patientid = b.patientid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+order by a.patientid
+);
+
+
+
+Create Temp Table Care_Plan_Discussion as (
+with Care_Plan_rank as(
+Select a.memberid,a.eligEffectiveDate,a.eligEndDate,b.goalCreatedDate,
+
+case when 
+(date(b.GoalCreatedDate,"America/New_York")  between a.eligEffectiveDate and a.eligEffectiveDate90) and
+(date(b.GoalCreatedDate,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.GoalCreatedDate,"America/New_York") < reporting_end_date) and 
+(b.daysGoalToModal between 0 and 30) and
+wasMemberInvolved = true then 
+rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by goalCreatedDate )  end as dateCp90_rnk,
+
+case when 
+(date(b.GoalCreatedDate,"America/New_York")  between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.GoalCreatedDate,"America/New_York") < reporting_end_date) and 
+((date(b.GoalCreatedDate,"America/New_York") < dateHraReportingPeriod)) or ((date(b.GoalCreatedDate,"America/New_York") > date_add(dateHraReportingPeriod, interval 7 day))) and 
+(date(b.goalCompletedAt,"America/New_York") is null or (date(b.goalCompletedAt,"America/New_York") > dateHraReportingPeriod)) and 
+(date(b.goalArchivedAt,"America/New_York") is null or (date(b.goalArchivedAt,"America/New_York") > dateHraReportingPeriod)) and 
+(b.daysGoalToModal between 0 and 30) and
+wasMemberInvolved = true then 
+rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by goalCreatedDate )  end as dateCPActiveReportingPeriod_rnk,
+
+case when 
+(date(b.GoalCreatedDate,"America/New_York")  between a.eligEffectiveDate and a.eligEndDate) and
+(date(b.GoalCreatedDate,"America/New_York") < reporting_end_date) and 
+(date(b.GoalCreatedDate,"America/New_York") < dateHraReportingPeriod) and 
+(date(b.GoalCreatedDate,"America/New_York") between dateHraReportingPeriod and date_add(dateHraReportingPeriod, interval 7 day)) and 
+(b.daysGoalToModal between 0 and 30) and
+wasMemberInvolved = true then 
+rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by goalCreatedDate )  end as dateCPNewReportingPeriod_rnk,
+
+From 
+Consent as a
+left join
+Care_Plan_Discussion_Model as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+)
+
+
+,dateCp90_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,goalCreatedDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by goalCreatedDate ) as dateCp90_rnk
+From 
+Care_Plan_rank
+where dateCp90_rnk is not null
+)
+
+
+,dateCp90 as (
+Select distinct  memberid, eligEffectiveDate,eligEndDate,goalCreatedDate
+From dateCp90_stg
+Where dateCp90_rnk = 1
+)
+
+
+
+
+,dateCPActiveReportingPeriod_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,goalCreatedDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by goalCreatedDate ) as dateCPActiveReportingPeriod_rnk
+From 
+Care_Plan_rank
+where dateCPActiveReportingPeriod_rnk is not null
+)
+
+
+,dateCPActiveReportingPeriod as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,goalCreatedDate
+From dateCPActiveReportingPeriod_stg
+Where dateCPActiveReportingPeriod_rnk = 1
+)
+
+
+
+,dateCPNewReportingPeriod_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,goalCreatedDate,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by goalCreatedDate ) as dateCPNewReportingPeriod_rnk
+From 
+Care_Plan_rank
+where dateCPNewReportingPeriod_rnk is not null
+)
+
+
+,dateCPNewReportingPeriod as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,goalCreatedDate
+From dateCPNewReportingPeriod_stg
+Where dateCPNewReportingPeriod_rnk = 1
+)
+
+
+Select a.*,
+date(b.GoalCreatedDate,"America/New_York")as dateCp90,--column AJ
+date(c.GoalCreatedDate,"America/New_York")as dateCPActiveReportingPeriod,--column AK
+date(d.GoalCreatedDate,"America/New_York") as dateCPNewReportingPeriod--column AL
+From
+Consent as a
+left join
+dateCp90 as b
+ on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+ left join
+ dateCPActiveReportingPeriod as c
+ on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+  left join
+ dateCPNewReportingPeriod as d
+ on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+
+);
+
+
+--Care Plan Refusal
+Create Temp Table Care_Plan_Refusal as (
+
+with CP_Refusal as(
+Select a.memberid,a.eligEffectiveDate,a.eligEndDate,b.declinedAt,c.dateofRefusal,
+
+case when
+a.dateCPActiveReportingPeriod is null and 
+(DATE(declinedAt ,"America/New_York") between a.eligEffectiveDate and a.eligEffectiveDate90) and
+(DATE(declinedAt ,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
+DATE(declinedAt ,"America/New_York") < reporting_end_date 
+then rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by DATE(declinedAt ,"America/New_York") ) end as dateCpRefusal90_rnk,
+
+
+case when
+a.dateCPActiveReportingPeriod is null and 
+c.refusalType = 'Assessment' and
+(c.dateofRefusal between a.eligEffectiveDate and a.eligEffectiveDate90) and
+(c.dateofRefusal between a.eligEffectiveDate and a.eligEndDate) and
+c.dateofRefusal <= reporting_end_date and
+c.sourceType in (
+'CBH_commonsStatus',
+'CBH_notInterested',
+'CBH_CBHServices',
+'CBH_incompleteHRA'
+)
+then rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by c.dateofRefusal ) end as dateCpRefusalPassive90_rnk,
+
+case when
+(
+a.dateCPActiveReportingPeriod  is null and 
+a.dateHraReassessment is not null and
+(DATE(declinedAt ,"America/New_York") between dateHraReassessment and dateReassessmentDue) and
+(DATE(declinedAt ,"America/New_York")  between a.eligEffectiveDate and a.eligEndDate) and
+DATE(declinedAt ,"America/New_York") < reporting_end_date 
+)
+or
+(
+a.dateCPActiveReportingPeriod  is null and 
+a.dateHraReassessment is null and
+(DATE(declinedAt ,"America/New_York") between date_sub(dateReassessmentDue,interval 90 day) and dateReassessmentDue) and
+(DATE(declinedAt ,"America/New_York")  between a.eligEffectiveDate and a.eligEndDate) and
+DATE(declinedAt ,"America/New_York") < reporting_end_date 
+)
+then rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by DATE(declinedAt ,"America/New_York")  ) end as dateCpRefusalReassessment_rnk,
+
+
+case when
+(
+a.dateCPActiveReportingPeriod  is null and 
+c.refusalType = 'Assessment' and
+(c.dateofRefusal between a.eligEffectiveDate and a.eligEndDate) and
+c.dateofRefusal <= reporting_end_date and
+a.dateHraReassessment is not null and
+(c.dateofRefusal between a.dateHraReassessment and a.dateReassessmentDue) and 
+c.sourceType in (
+'CBH_commonsStatus',
+'CBH_notInterested',
+'CBH_CBHServices',
+'CBH_incompleteHRA'
+))
+
+or
+(
+a.dateCPActiveReportingPeriod  is null and
+c.refusalType = 'Assessment' and
+(c.dateofRefusal between a.eligEffectiveDate and a.eligEndDate) and
+c.dateofRefusal <= reporting_end_date and
+a.dateHraReassessment is null and
+(c.dateofRefusal between date_sub(dateReassessmentDue,interval 90 day) and dateReassessmentDue) and 
+c.sourceType in (
+'CBH_commonsStatus',
+'CBH_notInterested',
+'CBH_CBHServices',
+'CBH_incompleteHRA'
+))
+then rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by c.dateofRefusal  ) end as dateCpReassessmentRefusalPassive_rnk,
+
+From 
+Care_Plan_Discussion as a
+left join
+(
+Select *
+From
+`cityblock-analytics.commons.patient_attribute`
+where declinedAt is not null and         
+type = 'declinedActionPlan' and deletedAt is null 
+)
+  as b
+on a.patientid = b.patientid
+left join
+`cityblock-analytics.abs_client_reporting.DBT_Tufts_Refusals_Raw` as c
+on a.patientid = c.patientid
+)
+
+
+
+,dateCpRefusal90_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,declinedAt,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by declinedAt desc ) as dateCpRefusal90_rnk
+From 
+CP_Refusal
+where dateCpRefusal90_rnk is not null
+)
+
+
+,dateCpRefusal90 as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,DATE(declinedAt ,"America/New_York") as declinedAt
+From dateCpRefusal90_stg
+Where dateCpRefusal90_rnk = 1
+)
+
+
+
+
+,dateCpRefusalPassive90_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,dateofRefusal,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by dateofRefusal desc) as dateCpRefusalPassive90_rnk
+From 
+CP_Refusal
+where dateCpRefusalPassive90_rnk is not null
+)
+
+
+,dateCpRefusalPassive90 as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,dateofRefusal
+From dateCpRefusalPassive90_stg
+Where dateCpRefusalPassive90_rnk = 1
+)
+
+
+,dateCpRefusalReassessment_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,declinedAt,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by declinedAt desc) as dateCpRefusalReassessment_rnk
+From 
+CP_Refusal
+where dateCpRefusalReassessment_rnk is not null
+)
+
+
+,dateCpRefusalReassessment as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,DATE(declinedAt ,"America/New_York") as declinedAt
+From dateCpRefusalReassessment_stg
+Where dateCpRefusalReassessment_rnk = 1
+)
+
+
+,dateCpReassessmentRefusalPassive_stg as (
+Select memberid, eligEffectiveDate,eligEndDate,dateofRefusal,
+dense_rank()over(partition by memberid,eligEffectiveDate,eligEndDate order by dateofRefusal desc) as dateCpReassessmentRefusalPassive_rnk
+From 
+CP_Refusal
+where dateCpReassessmentRefusalPassive_rnk is not null
+)
+
+
+,dateCpReassessmentRefusalPassive as (
+Select distinct memberid, eligEffectiveDate,eligEndDate,dateofRefusal
+From dateCpReassessmentRefusalPassive_stg
+Where dateCpReassessmentRefusalPassive_rnk = 1
+)
+
+
+,final_table_stg as (
+Select distinct a.*,
+b.declinedAt as dateCpRefusal90,--column AM
+c.dateofRefusal as dateCpRefusalPassive90,--column AN
+d.declinedAt as dateCpRefusalReassessment,--column AO
+e.dateofRefusal as dateCpReassessmentRefusalPassive--column AP
+From
+Care_Plan_Discussion as a 
+left join
+dateCpRefusal90 as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+left join
+dateCpRefusalPassive90 as c
+on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
+left join
+dateCpRefusalReassessment as d
+on a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.eligEndDate = d.eligEndDate
+left join
+dateCpReassessmentRefusalPassive as e
+on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
+)
+
+,final_table_stg_2 as (
+Select distinct a.patientid,b.category,b.startDate,b.endDate,
+dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by b.endDate desc ) as category_rank
+From 
+final_table_stg as a 
+left join
+`cityblock-analytics.abs_member.historical_rating_category`  as b 
+on a.patientid = b.patientId 
+where (reporting_end_date between startDate and endDate) or ((reporting_end_date > startDate) and b.endDate is null)
+)
+
+
+Select a.*,
+b.category as ratingCategoryReportingPeriodEnd--column CJ
+From 
+final_table_stg as a
+left join
+(
+Select *
+From 
+final_table_stg_2 
+Where category_rank = 1
+)
+as b
+on a.patientid = b.patientid
+
+);
+
+Create Temp Table MMU_Output as (
+with mmu_stg as (
+Select distinct 
+a.patientId as patient_Id,
+a.memberID as member_ID,
+a.firstName as first_Name,
+a.lastName as last_Name,
+a.dateOfBirth as date_Of_Birth,
+a.eligEffectiveDate as enrollment_Effective_Date,
+a.eligEndDate as enrollment_End_Date,
+a.eligEffectiveDatePrior30 as enrollment_Effective_DatePrior30,
+a.eligEffectiveDate30 as enrollment_Effective_Date30,
+a.eligEffectiveDate90 as enrollment_Effective_Date90,
+a.eligEffectiveDate120 as enrollment_Effective_Date120,
+a.dateInitialHra as date_Initial_HRA,
+b.current_HRA_Date,
+b.previous_HRA_Date,
+a.dateHRA90 as date_HRA90,
+a.dateHraReportingPeriod as date_Hra_Reporting_Period,
+a.cohortHraReportingPeriod as cohort_Hra_Reporting_Period,
+a.dateReassessmentDue as date_Reassessment_Due,
+a.datelastHraPriorYr as date_last_Hra_Prior_Yr,
+a.datelastHraPrior2Yr as date_last_Hra_Prior_2_Yr,
+a.dateHraReassessment as date_Hra_Reassessment,
+a.dateHraPlus60 as date_Hra_Plus60,
+a.submitDateHraPlus60 as submit_date_Hra_Plus60,
+a.daysToGatewayInitialHRA as days_To_Gateway_Intial_HRA,
+a.daysToGateway as days_To_Gateway,
+a.dateHra90Refusal as date_HRA90_Refusal,
+a.dateApptNoShowHra90 as date_Appt_No_Show_Hra90,
+a.dateRefusalNoShowHra90 as date_Refusal_No_Show_Hra90,
+a.dateAppointment90plusHra90 as date_Appointment_90_plus_Hra90,
+a.dateHraRefusal91_120 as date_Hra_Refusal_91_120,
+a.dateHraApptNoShow91_120 as date_Hra_Appt_No_Show_91_120,
+a.dateHraRefusalNoShow91_120 as date_Hra_Refusal_No_Show_91_120,
+a.dateHraAppointment120plus91_120 as date_Hra_Appointment_120_plus_91_120,
+a.dateHraReassessmentRefusal as date_HRA_Reassessment_Refusal,
+a.dateApptNoShowHraReassessment as date_Appt_No_Show_Hra_Reassessment,
+a.dateRefusalNoShowHraReassessment as date_Refusal_No_Show_Hra_Reassessment,
+a.dateAppointmentplusHraReassessment as date_Appointment_plus_Hra_Reassessment,
+a.dateCp90 as date_Cp90,
+a.dateCPActiveReportingPeriod as date_CP_Active_Reporting_Period,
+a.dateCPNewReportingPeriod as date_CP_New_Reporting_Period,
+case when a.dateCp90 is null then a.dateCpRefusal90  else null end as date_Cp_Refusal90,
+case when a.dateCp90 is null then a.dateCpRefusalPassive90 else null end as date_Cp_Refusal_Passive90,
+a.dateCpRefusalReassessment as date_Cp_Refusal_Reassessment,
+a.dateCpReassessmentRefusalPassive as date_Cp_Reassessment_Refusal_Passive,
+a.Outreach30,
+a.dateOutreach1_90 as date_Outreach1_90,
+a.modalityOutreach1_90 as modality_Outreach1_90,
+a.dateOutreach2_90 as date_Outreach2_90,
+a.modalityOutreach2_90 as modality_Outreach2_90,
+a.dateOutreach3_90 as date_Outreach3_90,
+a.modalityOutreach3_90 as modality_Outreach3_90,
+a.dateMailer90 as date_Mailer90,
+a.dateOutreachSuccess90 as date_Outreach_Success90,
+a.dateOutreach1_91_120 as date_Outreach1_91_120,
+a.modalityOutreach1_91_120 as modality_Outreach1_91_120,
+a.dateOutreach2_91_120 as date_Outreach2_91_120,
+a.modalityOutreach2_91_120 as modality_Outreach2_91_120,
+a.dateOutreach3_91_120 as date_Outreach3_91_120,
+a.modalityOutreach3_91_120 as modality_Outreach3_91_120,
+a.dateOutreachSuccess91_120 as date_Outreach_Success91_120,
+a.dateHTR1_HraReassessment as date_HTR1_Hra_Reassessment,
+a.modalityHTR1_HraReassessment as modality_HTR1_Hra_Reassessment,
+a.dateHTR2_HraReassessment as date_HTR2_Hra_Reassessment,
+a.modalityHTR2_HraReassessment as modality_HTR2_Hra_Reassessment,
+a.dateHTR3_HraReassessment as date_HTR3_Hra_Reassessment,
+a.modalityHTR3_HraReassessment as modality_HTR3_Hra_Reassessment,
+a.dateMailerHraReassessment as date_Mailer_Hra_Reassessment,
+a.dateHTRSuccessHraReassessment as date_HTR_Success_Hra_Reassessment,
+a.dateOutreach1_275_365 ,
+a.modalityOutreach1_275_365 as modality_Outreach1_275_365,
+a.dateOutreach2_275_365,
+a.modalityOutreach2_275_365 as modality_Outreach2_275_365,
+a.dateOutreach3_275_365,
+a.modalityOutreach3_275_365 as modality_Outreach3_275_365,
+a.dateLtssOffer90 as date_Ltss_Offer90,
+a.Q1LtssOffer90 as Q1_Ltss_Offer90,
+a.Q2LtssOffer90 as Q2_Ltss_Offer90,
+a.ratingCategory90,
+a.ratingCategoryLtssOffer90 as rating_Category_Ltss_Offer90,
+a.dateLtssOfferReportingPeriod as date_Ltss_Offer_Reporting_Period,
+a.Q1LtssOfferReportingPeriod as Q1_Ltss_Offer_Reporting_Period,
+a.Q2LtssOfferReportingPeriod as Q2_Ltss_Offer_Reporting_Period,
+a.ratingCategoryLtssOfferReportingPeriod as rating_Category_Ltss_Offer_Reporting_Period,
+a.dateLtssReferral90 as date_Ltss_Referral90,
+a.reasonLtssReferral90 as reason_Ltss_Referral90,
+a.ratingCategoryLtssReferral90 as ratingCategoryLtssReferral90,
+a.dateLtssEncounter90 as date_Ltss_Encounter90,
+a.typeLtssEncounter90 as type_Ltss_Encounter_90,
+a.closeReasonLtssEncounter90 as close_Reason_Ltss_Encounter90,
+a.ratingCategoryEncounter90 as rating_Category_Encounter90,
+a.ratingCategoryReportingPeriodEnd as rating_Category_Reporting_Period_End,
+a.ltssCareTeamNameHraReportingPeriod as ltss_Care_Team_Name_Hra_Reporting_Period,
+a.dateLtssCareTeamNameHraReportingPeriod as date_Ltss_Care_Team_Name_Hra_Reporting_Period,
+a.dateWrittenConsent90 as date_Written_Consent90,
+a.dateVerbalConsent90 as date_Verbal_Consent90,
+a.flagConsent90 as flag_Consent90,
+row_number()over(partition by a.memberid order by a.memberid,a.eligEffectiveDate desc  ) as pt_rnk,--used to pick the most recent enrollment period
+b.deceasedStatus as deceased_status
+From Care_Plan_Refusal as a
+left join
+eligible_assessments as b
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+)
+
+, most_recent_enrollment as (
+Select *except(pt_rnk)
+From mmu_stg
+where pt_rnk = 1 
+)
+
+,refusals_combined_stg as (
+SELECT patient_id, member_id, date_HRA90_Refusal as dateofRefusal
+from
+most_recent_enrollment
+
+Union all
+
+SELECT patient_id, member_id, date_Appt_No_Show_Hra90 as dateofRefusal
+from
+most_recent_enrollment
+
+Union all
+
+SELECT patient_id, member_id, date_Refusal_No_Show_Hra90 as dateofRefusal
+from
+most_recent_enrollment
+
+Union all
+
+SELECT patient_id, member_id, date_Appointment_90_plus_Hra90 as dateofRefusal
+from
+most_recent_enrollment
+)
+
+, refusals_combined as (
+Select distinct a.patient_Id,b.member_id,b.dateofRefusal
+From
+most_recent_enrollment as a
+join
+refusals_combined_stg as b
+on a.member_ID = b.member_id
+where 
+date_HRA90 is null and 
+dateofRefusal <= reporting_end_date and
+((date_Initial_HRA is null) or (date_Initial_HRA > enrollment_Effective_Date90))
+)
+
+
+, max_refusal_date as (
+Select distinct patient_Id,max(dateofRefusal) as date_Of_refusal
+From 
+refusals_combined
+group by patient_Id
+)
+
+Select 
+a.patient_Id,
+member_ID,
+first_Name,
+last_Name,
+date_Of_Birth,
+enrollment_Effective_Date,
+enrollment_End_Date,
+enrollment_Effective_DatePrior30,
+enrollment_Effective_Date30,
+enrollment_Effective_Date90,
+enrollment_Effective_Date120,
+date_Initial_HRA,
+current_HRA_Date,
+previous_HRA_Date,
+date_HRA90,
+date_Hra_Reporting_Period,
+cohort_Hra_Reporting_Period,
+date_Reassessment_Due,
+date_last_Hra_Prior_Yr,
+date_last_Hra_Prior_2_Yr,
+date_Hra_Reassessment,
+date_Hra_Plus60,
+submit_date_Hra_Plus60,
+days_To_Gateway_Intial_HRA,
+days_To_Gateway,
+b.date_Of_refusal,
+date_HRA90_Refusal,
+date_Appt_No_Show_Hra90,
+date_Refusal_No_Show_Hra90,
+date_Appointment_90_plus_Hra90,
+date_Hra_Refusal_91_120,
+date_Hra_Appt_No_Show_91_120,
+date_Hra_Refusal_No_Show_91_120,
+date_Hra_Appointment_120_plus_91_120,
+date_HRA_Reassessment_Refusal,
+date_Appt_No_Show_Hra_Reassessment,
+date_Refusal_No_Show_Hra_Reassessment,
+date_Appointment_plus_Hra_Reassessment,
+date_Cp90,
+date_CP_Active_Reporting_Period,
+date_CP_New_Reporting_Period,
+date_Cp_Refusal90,
+date_Cp_Refusal_Passive90,
+date_Cp_Refusal_Reassessment,
+date_Cp_Reassessment_Refusal_Passive,
+Outreach30,
+date_Outreach1_90,
+modality_Outreach1_90,
+date_Outreach2_90,
+modality_Outreach2_90,
+date_Outreach3_90,
+modality_Outreach3_90,
+date_Mailer90,
+
+case when
+date_Outreach1_90 is not null and
+date_Outreach2_90 is not null and
+date_Outreach3_90 is not null and
+date_HRA90_Refusal is null and
+date_HRA90 is null and
+date_Initial_HRA is null and
+b.date_Of_refusal is null and
+(date_Outreach1_90 between enrollment_Effective_Date and enrollment_Effective_Date90) and
+(date_Outreach1_90 <= reporting_end_date) and
+(date_Outreach_Success90 <= date_Outreach1_90 or date_Outreach_Success90 is null)
+then 'HTR' else null end as HTR_Flag,
+
+date_Outreach_Success90,
+date_Outreach1_91_120,
+modality_Outreach1_91_120,
+date_Outreach2_91_120,
+modality_Outreach2_91_120,
+date_Outreach3_91_120,
+modality_Outreach3_91_120,
+date_Outreach_Success91_120,
+date_HTR1_Hra_Reassessment,
+modality_HTR1_Hra_Reassessment,
+date_HTR2_Hra_Reassessment,
+modality_HTR2_Hra_Reassessment,
+date_HTR3_Hra_Reassessment,
+modality_HTR3_Hra_Reassessment,
+
+case when
+date_HTR1_Hra_Reassessment is not null and
+date_HTR2_Hra_Reassessment is not null and
+date_HTR3_Hra_Reassessment is not null and
+date_Hra_Reassessment is null and
+date_Hra_Reassessment_Refusal  is null and
+(date_HTR1_Hra_Reassessment <= reporting_end_date) and
+(date_HTR_Success_Hra_Reassessment <= date_HTR1_Hra_Reassessment or date_HTR_Success_Hra_Reassessment is null)
+then 'HTR_Reassessment' else null end as Reasseement_HTR_Flag,
+
+date_Mailer_Hra_Reassessment,
+date_HTR_Success_Hra_Reassessment,
+dateOutreach1_275_365 ,
+modality_Outreach1_275_365,
+dateOutreach2_275_365,
+modality_Outreach2_275_365,
+dateOutreach3_275_365,
+modality_Outreach3_275_365,
+date_Ltss_Offer90,
+Q1_Ltss_Offer90,
+Q2_Ltss_Offer90,
+ratingCategory90,
+rating_Category_Ltss_Offer90,
+date_Ltss_Offer_Reporting_Period as date_Ltss_Offer_Current,
+Q1_Ltss_Offer_Reporting_Period,
+Q2_Ltss_Offer_Reporting_Period,
+rating_Category_Ltss_Offer_Reporting_Period,
+date_Ltss_Referral90,
+reason_Ltss_Referral90,
+ratingCategoryLtssReferral90,
+date_Ltss_Encounter90,
+type_Ltss_Encounter_90,
+close_Reason_Ltss_Encounter90,
+rating_Category_Encounter90,
+rating_Category_Reporting_Period_End,
+ltss_Care_Team_Name_Hra_Reporting_Period,
+date_Ltss_Care_Team_Name_Hra_Reporting_Period,
+date_Written_Consent90,
+date_Verbal_Consent90,
+flag_Consent90,
+deceased_status
+From 
+most_recent_enrollment as a 
+left join
+max_refusal_date as b
+on a.patient_Id = b.patient_Id
+
+);
+
+
+
+
+Create Temp Table SLA_7 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_Date30,date_Initial_HRA,Outreach30,
+case when 
+(Outreach30 is not null)
+or 
+(date_Initial_HRA is not null)
+then 1 else 0 end as sla7Numerator
+From MMU_Output
+where 
+(enrollment_Effective_Date between reporting_start_date and reporting_end_date) and (enrollment_End_Date >= reporting_end_date) and
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and 
+patient_Id is not null and
+deceased_status is null
+
+);
+
+
+Create Temp Table SLA_8 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_DatePrior30, current_HRA_Date,date_Ltss_Offer_Current,ltss_Care_Team_Name_Hra_Reporting_Period,date_Ltss_Care_Team_Name_Hra_Reporting_Period,rating_Category_Reporting_Period_End,
+case when (date_Ltss_Offer_Current is not null) or (date_Ltss_Care_Team_Name_Hra_Reporting_Period is not null) then 1 else 0 end as sla8Numerator
+From MMU_Output
+where 
+date_Hra_Reporting_Period is not null and (enrollment_End_Date >= reporting_end_date) and
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and
+deceased_status is null
+);
+
+
+
+Create Temp Table SLA_9 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_DatePrior30, date_HRA90,date_Ltss_Offer90,date_Written_Consent90,date_Verbal_Consent90,
+case when date_Ltss_Offer90 is not null then 1 else 0 end as sla9Numerator
+From MMU_Output
+where 
+(enrollment_Effective_Date90 between reporting_start_date and reporting_end_date) and 
+(enrollment_Effective_Date90 <= enrollment_End_Date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+((date_Written_Consent90 is not null) or (date_Verbal_Consent90 is not null) or (date_HRA90 is not null)) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and
+deceased_status is null
+
+);
+
+
+Create Temp Table SLA_10 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_HRA90, 
+case when date_HRA90 is not null then 1 else 0 end as sla10
+From MMU_Output
+where 
+(enrollment_Effective_Date90 between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and 
+deceased_status is null
+
+);
+
+Create Temp Table SLA_11 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_Date90, date_Outreach1_90,modality_Outreach1_90,
+date_Outreach2_90,modality_Outreach2_90,date_Outreach3_90,HTR_Flag,modality_Outreach3_90,date_Outreach_Success90,date_Hra90_Refusal,date_Refusal_No_Show_Hra90,date_Appointment_90_plus_Hra90,
+1 as sla11Numerator
+From MMU_Output
+where 
+(enrollment_Effective_Date90 between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+date_Outreach1_90 is not null and
+date_Outreach2_90 is not null and
+date_Outreach3_90 is not null and
+((date_Outreach_Success90 <= date_Outreach1_90) or 
+(date_Outreach_Success90 is null)) and
+date_HRA90 is null and
+date_Initial_HRA is null and
+date_Hra90_Refusal is null and 
+date_Refusal_No_Show_Hra90 is null and
+date_Appointment_90_plus_Hra90 is null and
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and 
+deceased_status is null
+);
+
+Create Temp Table SLA_12 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_Date90,
+date_Refusal_No_Show_Hra90,date_Appointment_90_plus_Hra90,date_Mailer90,date_Outreach1_90,date_Of_Refusal,
+case when 
+(date_Mailer90 is not null) or (date_Outreach1_90 is not null) then 1 else 0 end as slaNumerator12
+From MMU_Output
+where 
+(enrollment_Effective_Date90 between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+((date_Of_refusal is not null) or (date_Refusal_No_Show_Hra90 is not null) or (date_Appointment_90_plus_Hra90) is not null) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and
+deceased_status is null
+
+);
+
+
+Create Temp Table SLA_13 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_Initial_Hra,date_Hra_Plus60,
+submit_Date_Hra_Plus60,days_To_Gateway_Intial_HRA,
+case when 
+submit_date_Hra_Plus60 is not null then 1 else 0 end as slaNumerator13
+From MMU_Output
+where 
+date_Initial_Hra != date_Hra_Plus60 and 
+(date_Hra_Plus60 between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null
+and days_To_Gateway_Intial_HRA between 0 and 60 and 
+deceased_status is null
+
+);
+
+Create Temp Table SLA_14 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_Reassessment_Due,date_Hra_Reassessment,
+
+case when 
+date_Hra_Reassessment is not null then 1 else 0 end as sla14Numerator
+From MMU_Output
+where 
+(date_Reassessment_Due between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and 
+deceased_status is null
+
+);
+
+Create Temp Table SLA_15 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_Reassessment_Due,date_HTR1_Hra_Reassessment,modality_HTR1_Hra_Reassessment,
+date_HTR2_Hra_Reassessment,modality_HTR2_Hra_Reassessment,date_HTR3_Hra_Reassessment,modality_HTR3_Hra_Reassessment,date_Mailer_Hra_Reassessment,date_Hra_Reassessment_Refusal,
+date_Refusal_No_Show_Hra_Reassessment,date_Appointment_plus_Hra_Reassessment,date_HTR_Success_Hra_Reassessment,
+case when 
+(dateOutreach1_275_365 is not null) and (dateOutreach2_275_365 is not null) and (dateOutreach3_275_365 is not null) then 1 else 0 end as sla15Numerator
+From MMU_Output
+where 
+(date_Reassessment_Due between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+date_HTR1_Hra_Reassessment is not null and 
+date_HTR2_Hra_Reassessment is not null and 
+date_HTR3_Hra_Reassessment is not null and 
+date_Mailer_Hra_Reassessment is not null and
+(date_HTR_Success_Hra_Reassessment < date_HTR1_Hra_Reassessment) and
+(date_HTR_Success_Hra_Reassessment < date_HTR2_Hra_Reassessment) and 
+(date_HTR_Success_Hra_Reassessment < date_HTR3_Hra_Reassessment) and
+date_HRA_Reassessment is null and
+date_Hra_Reassessment_Refusal is null and
+date_Refusal_No_Show_Hra_Reassessment is null and 
+date_Appointment_plus_Hra_Reassessment is null and
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and 
+deceased_status is null
+
+);
+
+Create Temp Table SLA_16 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_Reassessment_Due,date_Hra_Reassessment_Refusal,date_Refusal_No_Show_Hra_Reassessment,
+date_Appointment_plus_Hra_Reassessment,dateOutreach1_275_365,
+case when 
+dateOutreach1_275_365 is not null then 1 else 0 end as sla16Numerator
+From MMU_Output
+where 
+(date_Reassessment_Due between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+((date_Hra_Reassessment_Refusal is not null) or (date_Refusal_No_Show_Hra_Reassessment is not null) or (date_Appointment_plus_Hra_Reassessment is not null)) and
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and
+deceased_status is null
+
+);
+
+
+Create Temp Table SLA_17 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_Initial_Hra,date_Hra_Plus60,submit_Date_Hra_Plus60,
+days_To_Gateway,
+case when 
+submit_Date_Hra_Plus60 is not null then 1 else 0 end as sla17Numerator
+From MMU_Output
+where 
+(date_Hra_Plus60 between reporting_start_date and reporting_end_date) and 
+(date_Hra_Plus60 != date_Initial_Hra) and
+(enrollment_End_Date >= reporting_end_date) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and
+days_To_Gateway between 0 and 60 and
+deceased_status is null
+
+);
+
+
+Create Temp Table SLA_18 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_Date90,date_HRA90,date_Cp90,
+date_Cp_Refusal90,date_Cp_Refusal_Passive90,
+case when 
+date_Cp90 is not null then 1 else 0 end as sla18Numerator
+From MMU_Output
+where 
+(enrollment_Effective_Date90 between reporting_start_date and reporting_end_date) and 
+(enrollment_End_Date >= reporting_end_date) and 
+date_HRA90 is not null and
+date_Cp_Refusal90 is null and 
+date_Cp_Refusal_Passive90 is null and
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and
+deceased_status is null
+
+);
+
+Create Temp Table SLA_19 as (
+
+Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,date_Initial_Hra,date_Hra_Reporting_Period,date_CP_New_Reporting_Period,
+date_CP_Active_Reporting_Period,
+case when 
+((date_CP_New_Reporting_Period is not null) or (date_CP_Active_Reporting_Period is not null)) then 1 else 0 end as sla19Numerator
+From MMU_Output
+where 
+date_Hra_Reporting_Period is not null and 
+date_Initial_HRA != date_Hra_Reporting_Period and
+(enrollment_End_Date >= reporting_end_date) and 
+(rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+patient_Id is not null and 
+deceased_status is null
+
+);
+
+---------------------------------------------------------------------------------------
+-- OUTPUT
+---------------------------------------------------------------------------------------
+select *from MMU_Output;
+select * from SLA_7;
+select * from SLA_8;
+select * from SLA_9;
+select * from SLA_10;
+select * from SLA_11;
+select * from SLA_12;
+select * from SLA_13;
+select * from SLA_14;
+select * from SLA_15;
+select * from SLA_16;
+select * from SLA_17;
+select * from SLA_18;
+select * from SLA_19;
