@@ -396,7 +396,16 @@ left join
 ReassessmentDue_4 as e on
 a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
 )
-
+/*
+Select *
+From ReassessmentDue
+where memberid in (
+'N0096821701',
+'1962A629401',
+'N0096872601',
+'N0035678001'
+)
+*/
 , dateHraReassess_stg as (
 Select a.memberid,a.eligEffectiveDate,a.eligEndDate,b.assessmentDate,
 dense_rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  b.assessmentDate)  as dateHraReassessment_rnk
@@ -1098,6 +1107,11 @@ on a.memberid = o.memberid and a.eligEffectiveDate = o.eligEffectiveDate and a.e
 );
 
 
+
+
+
+
+
 --Refusals
 CREATE TEMP TABLE Refusals as (
 
@@ -1541,11 +1555,11 @@ dateApptNoShow
 --Care Plans
 CREATE TEMP TABLE Care_Plans as (
 with Care_Plans_rnk as (
-Select distinct a.memberId,a.eligEffectiveDate,a.eligEndDate,assessmentId,a.patientid,a.eligEffectiveDate90,b.patientAnswerCreatedAt as ltss_date,
+Select distinct a.memberId,a.eligEffectiveDate,a.eligEndDate,assessmentId,a.patientid,a.eligEffectiveDate90,b.patientAnswerCreatedAt as ltss_date,dateInitialHra,
 
 case when assessmentSlug = 'long-term-services-coordinator-screening-tool' and 
-date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and eligEffectiveDate90 and
-date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and eligEndDate and
+((date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and eligEffectiveDate90) or
+(date(b.patientAnswerCreatedAt,"America/New_York") between eligEffectiveDatePrior30 and date_add(dateInitialHra, interval 7 day))) and
 date(b.patientAnswerCreatedAt,"America/New_York") <= reporting_end_date then
 dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by b.patientAnswerCreatedAt ) end as dateLtssOffer90_rnk,
 
@@ -1582,6 +1596,9 @@ From
 Care_Plans_rnk
 where dateLtssOffer90_rnk is not null
 )
+
+
+
 
 
 ,dateLtssOffer90_stg as (
@@ -2113,6 +2130,17 @@ ltssCoordinator as b
 on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate and a.dateHraReportingPeriod = b.dateHraReportingPeriod
 );
 
+/*
+SElect *
+From 
+Care_Plans
+Where
+memberid = '0026P123801'
+
+Select *
+From Care_Plans
+Where memberid = '7444P312601'
+*/
 
 --Consent
 CREATE TEMP TABLE Consent as (
@@ -3126,7 +3154,6 @@ days_To_Gateway between 0 and 60 and
 deceased_status is null
 
 );
-
 
 Create Temp Table SLA_18 as (
 
