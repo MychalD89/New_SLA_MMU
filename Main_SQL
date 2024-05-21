@@ -1,8 +1,8 @@
 --For April we will need to add +1 to the reporting end date for SLAs looking at 90 days of enrollment
 --For May we will need to add +1 to the reporting start date for SLAs looking at 90 days of enrollment 
 --This is to account for Feb not having 30 days 
-Declare reporting_start_date Datetime Default '2024-02-01';
-Declare reporting_end_date Datetime Default '2024-02-29';  
+Declare reporting_start_date Datetime Default '2024-03-01';
+Declare reporting_end_date Datetime Default '2024-03-31';  
   
 
 
@@ -2352,7 +2352,7 @@ rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by 
 case when 
 (date(b.GoalCreatedDate,"America/New_York")  between a.eligEffectiveDate and a.eligEndDate) and
 (date(b.GoalCreatedDate,"America/New_York") < reporting_end_date) and 
-((date(b.GoalCreatedDate,"America/New_York") < dateHraReportingPeriod)) or ((date(b.GoalCreatedDate,"America/New_York") > date_add(dateHraReportingPeriod, interval 7 day))) and 
+((date(b.GoalCreatedDate,"America/New_York") < dateHraReportingPeriod)) or ((date(b.GoalCreatedDate,"America/New_York") between  dateHraReportingPeriod and date_add(dateHraReportingPeriod, interval 7 day))) and 
 (date(b.goalCompletedAt,"America/New_York") is null or (date(b.goalCompletedAt,"America/New_York") > dateHraReportingPeriod)) and 
 (date(b.goalArchivedAt,"America/New_York") is null or (date(b.goalArchivedAt,"America/New_York") > dateHraReportingPeriod)) and 
 (b.daysGoalToModal between 0 and 30) and
@@ -2362,7 +2362,6 @@ rank()over(partition by  a.patientid,a.eligEffectiveDate,a.eligEndDate order by 
 case when 
 (date(b.GoalCreatedDate,"America/New_York")  between a.eligEffectiveDate and a.eligEndDate) and
 (date(b.GoalCreatedDate,"America/New_York") < reporting_end_date) and 
-(date(b.GoalCreatedDate,"America/New_York") < dateHraReportingPeriod) and 
 (date(b.GoalCreatedDate,"America/New_York") between dateHraReportingPeriod and date_add(dateHraReportingPeriod, interval 7 day)) and 
 (b.daysGoalToModal between 0 and 30) and
 wasMemberInvolved = true then 
@@ -3160,14 +3159,12 @@ Create Temp Table SLA_18 as (
 Select patient_Id,member_ID, first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,enrollment_Effective_Date90,date_HRA90,date_Cp90,
 date_Cp_Refusal90,date_Cp_Refusal_Passive90,
 case when 
-date_Cp90 is not null then 1 else 0 end as sla18Numerator
+date_Cp90 is not null and date_Cp_Refusal90 is null and date_Cp_Refusal_Passive90 is null then 1 else 0 end as sla18Numerator
 From MMU_Output
 where 
 (enrollment_Effective_Date90 between reporting_start_date and reporting_end_date) and 
 (enrollment_End_Date >= reporting_end_date) and 
 date_HRA90 is not null and
-date_Cp_Refusal90 is null and 
-date_Cp_Refusal_Passive90 is null and
 (rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
 patient_Id is not null and
 deceased_status is null
