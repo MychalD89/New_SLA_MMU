@@ -2306,9 +2306,9 @@ goalLabel not in ('Engagement','Workflow')
 
 , criteria as (
 Select distinct a.patientid, a.eligEffectiveDate,a.eligEndDate,b.id as idCPModal,b.wasMemberInvolved,b.updateReason,b.allMemberNeedsAddressed,b.createdAt as dateCPModal,
-case when  b.createdAt  >= a.goalCreatedDate then 1 else 0 end as Criteria1,
-case when (b.createdAt  <= a.goalCompletedAt) or (a.goalCompletedAt is null) then 1 else 0 end as Criteria2,
-case when (b.createdAt  <= a.goalArchivedAt) or (a.goalArchivedAt) is null then 1 else 0 end as Criteria3
+case when (date(b.createdAt) between eligEffectiveDate and eligEndDate) and  b.createdAt  >= a.goalCreatedDate then 1 else 0 end as Criteria1,
+case when (date(b.createdAt) between eligEffectiveDate and eligEndDate) and (b.createdAt  <= a.goalCompletedAt) or (a.goalCompletedAt is null) then 1 else 0 end as Criteria2,
+case when (date(b.createdAt) between eligEffectiveDate and eligEndDate) and (b.createdAt  <= a.goalArchivedAt) or (a.goalArchivedAt) is null then 1 else 0 end as Criteria3
 From 
 Goals_tasks as a
 left join
@@ -2316,13 +2316,16 @@ left join
 on a.patientid = b.patientid
 )
 
+
+
 , minimum_modal_date as (
 SElect distinct *,
-dense_RANK() OVER (PARTITION BY patientid ORDER BY dateCPModal ASC) AS finish_rank
+dense_RANK() OVER (PARTITION BY patientid,eligEffectiveDate,eligEndDate ORDER BY dateCPModal ASC) AS finish_rank
 From criteria
 where Criteria1 = 1 and Criteria2  = 1 and criteria3 = 1
 order by patientid,dateCPModal
 )
+
 
 , modal_final as (
 Select distinct * except(Criteria1,Criteria2,Criteria3,finish_rank)
