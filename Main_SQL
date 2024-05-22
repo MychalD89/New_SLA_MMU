@@ -316,11 +316,12 @@ CREATE TEMP TABLE reassessments as (
 --Criteria 1
 with ReassessmentDue_1 as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,dateInitialHra,datelastHraPriorYr,
-datelastHraPriorYr + 365  as dateReassessmentDue_1
+date_add(datelastHraPriorYr, interval 1 year) as dateReassessmentDue_1
          
 From eligible_assessments
 where 
-dateInitialHra is not null and datelastHraPriorYr is not null --and
+dateInitialHra is not null and 
+datelastHraPriorYr is not null --and
 --(date_add(datelastHraPriorYr, interval 365 day) <= eligEndDate)
 )
 
@@ -333,7 +334,10 @@ cast ((concat( extract(year from reporting_start_date),'-',extract(month from da
 
 From eligible_assessments
 Where 
-dateInitialHra is not null and datelastHraPriorYr is null --and 
+dateInitialHra is not null and 
+datelastHraPriorYr is null and
+datelastHraPrior2Yr is not null and
+dateInitialHra != current_HRA_Date--and 
 --cast((concat( extract(year from reporting_start_date),'-',extract(month from datelastHraPrior2Yr),'-',extract(day from datelastHraPrior2Yr))) as date)<= eligEndDate
 )
 
@@ -343,9 +347,11 @@ Select distinct memberid,eligEffectiveDate,eligEndDate,
 --date_add(dateInitialHra,interval 365 Day) as dateReassessmentDue_3
 cast ((concat( extract(year from reporting_start_date),'-',extract(month from dateInitialHra),'-',extract(day from dateInitialHra))) as date) as dateReassessmentDue_3
 From eligible_assessments
-where dateInitialHra is not null and 
+where 
+dateInitialHra is not null and 
 datelastHraPriorYr is null and 
-datelastHraPrior2Yr is null 
+datelastHraPrior2Yr is null and
+dateInitialHra != current_HRA_Date
 )
 --criteria 4
 ,ReassessmentDue_4 as(
@@ -364,16 +370,30 @@ From eligible_assessments
 where 
 dateInitialHra is not null and  
 current_HRA_Date <= eligEndDate and
-dateInitialHra != current_HRA_Date 
+dateInitialHra != current_HRA_Date and
+datelastHraPriorYr is null
 )
 
+,ReassessmentDue_5 as(
+Select distinct memberid,eligEffectiveDate,eligEndDate,
+case when extract(year from reporting_start_date) = extract(year from dateInitialHra ) then date_add(dateInitialHra, interval 1 year) 
+else null
+end as dateReassessmentDue_5
 
+From eligible_assessments
+where 
+dateInitialHra is not null and  
+current_HRA_Date <= eligEndDate and
+dateInitialHra = current_HRA_Date 
+)
 
 
 , ReassessmentDue as (
 Select distinct a.*,
 
-case when dateReassessmentDue_4 is not null then dateReassessmentDue_4
+case 
+     when dateReassessmentDue_5 is not null then dateReassessmentDue_5
+     when dateReassessmentDue_4 is not null then dateReassessmentDue_4
      when dateReassessmentDue_3 is not null then dateReassessmentDue_3
      when dateReassessmentDue_1 is not null then dateReassessmentDue_1
      when dateReassessmentDue_2 is not null then dateReassessmentDue_2
@@ -395,17 +415,13 @@ a.memberid = d.memberid and a.eligEffectiveDate = d.eligEffectiveDate and a.elig
 left join
 ReassessmentDue_4 as e on
 a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
+left join
+ReassessmentDue_5 as f on
+a.memberid = f.memberid and a.eligEffectiveDate = f.eligEffectiveDate and a.eligEndDate = f.eligEndDate
 )
-/*
-Select *
-From ReassessmentDue
-where memberid in (
-'N0096821701',
-'1962A629401',
-'N0096872601',
-'N0035678001'
-)
-*/
+
+
+
 , dateHraReassess_stg as (
 Select a.memberid,a.eligEffectiveDate,a.eligEndDate,b.assessmentDate,
 dense_rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by  b.assessmentDate)  as dateHraReassessment_rnk
