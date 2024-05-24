@@ -761,12 +761,15 @@ group by memberId,eligEffectiveDate,eligEndDate
 --90 day outreaches
 ,dateOutreach90_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_90_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_90_rnk
 From 
 Outreaches_rnk
 where dateOutreach1_90_rnk is not null
 
 )
+
+
+
 
 ,dateOutreach90 as (
 SELECT
@@ -781,6 +784,11 @@ dateOutreach1_90_rnk in (1,2,3))
 group by memberId,eligEffectiveDate,eligEndDate
 )
 
+/*
+Select *
+From dateOutreach90
+where memberid = '3647F835001'
+*/
 --7282
 
 --Selecting the first 5 modalities that happened within the first 90 days of enrollment
@@ -803,7 +811,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 -- 90 day mailier
 ,dateMailer90_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateMailer90_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateMailer90_rnk
 From 
 Outreaches_rnk
 where dateMailer90_rnk is not null
@@ -827,7 +835,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 -- 90 day success
 ,dateOutreachSuccess90_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreachSuccess90_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreachSuccess90_rnk
 From 
 Outreaches_rnk
 where dateOutreachSuccess90_rnk is not null
@@ -850,7 +858,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 --outreach 91 - 120 days
 ,dateOutreach1_91_120_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_91_120_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_91_120_rnk
 From 
 Outreaches_rnk
 where dateOutreach1_91_120_rnk is not null
@@ -892,7 +900,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateOutreachSuccess91_120_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreachSuccess91_120_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreachSuccess91_120_rnk
 From 
 Outreaches_rnk
 where dateOutreachSuccess91_120_rnk is not null
@@ -916,7 +924,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 --HRT Reassessments
 ,dateHTR1_HraReassessment_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateHTR1_HraReassessment_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateHTR1_HraReassessment_rnk
 From 
 Outreaches_rnk
 where dateHTR1_HraReassessment_rnk is not null
@@ -956,7 +964,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateMailerHraReassessment_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateMailerHraReassessment_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateMailerHraReassessment_rnk
 From 
 Outreaches_rnk
 where dateMailerHraReassessment_rnk is not null
@@ -977,7 +985,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateHTRSuccessHraReassessment_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateHTRSuccessHraReassessment_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateHTRSuccessHraReassessment_rnk
 From 
 Outreaches_rnk
 where dateHTRSuccessHraReassessment_rnk is not null
@@ -998,7 +1006,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 --outreaches between days 275-365
 ,dateOutreach1_275_365_cte as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,outreachDate,modality,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_275_365_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by outreachDate desc ) as dateOutreach1_275_365_rnk
 From 
 Outreaches_rnk
 where dateOutreach1_275_365_rnk is not null
@@ -1175,10 +1183,9 @@ as c
 on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
 )
 
-
 ,dateHra90Refusal_stg as (
 Select distinct a.memberid,a.dateofRefusal,a.eligEffectiveDate,a.eligEndDate,b.assessmentdate,
-dense_rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal desc ) as dateHra90Refusal_rnk
+row_number()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal desc ) as dateHra90Refusal_rnk
 From 
 Refusal_stg as a
 left join
@@ -1203,7 +1210,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateHraRefusal91_120_stg as (
 Select distinct a.memberid,dateofRefusal,a.eligEffectiveDate,a.eligEndDate,
-dense_rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal ) as dateHraRefusal91_120_rnk
+row_number()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal ) as dateHraRefusal91_120_rnk
 From 
 Refusal_stg as a
 left join
@@ -1229,7 +1236,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,lastest_refuals_stg as (
 Select distinct a.memberid,dateofRefusal,a.eligEffectiveDate,a.eligEndDate,
-dense_rank()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal desc ) as latest_refusal_rnk
+row_number()over(partition by  a.memberid,a.eligEffectiveDate,a.eligEndDate order by dateofRefusal desc ) as latest_refusal_rnk
 From 
 Refusal_stg as a
 left join
@@ -1328,7 +1335,7 @@ on a.patientid = b.patientId --and a.assessmentdate = date(b.createdAt,"America/
 
 ,dateAppointment90plusHra90_stg as (
 Select memberid,createdAt,eligEffectiveDate,eligEndDate,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt desc ) as dateAppointment90plusHra90_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdAt desc ) as dateAppointment90plusHra90_rnk
 From 
 refusals_combined_pt2
 where dateAppointment90plusHra90_rnk is not null
@@ -1351,7 +1358,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateHraAppointment120plus91_120_stg as (
 Select memberid,createdAt,eligEffectiveDate,eligEndDate,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdat desc ) as dateHraAppointment120plus91_120_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdat desc ) as dateHraAppointment120plus91_120_rnk
 From 
 refusals_combined_pt2
 where dateHraAppointment120plus91_120_rnk is not null
@@ -1373,7 +1380,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateAppointmentplusHraReassessment_stg as (
 Select memberid,createdAt,eligEffectiveDate,eligEndDate,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdat desc ) as dateAppointmentplusHraReassessment_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by createdat desc ) as dateAppointmentplusHraReassessment_rnk
 From 
 refusals_combined_pt2
 where dateAppointmentplusHraReassessment_rnk is not null
@@ -1412,6 +1419,7 @@ left join
 dateAppointmentplusHraReassessment as e
 on a.memberid = e.memberid and a.eligEffectiveDate = e.eligEffectiveDate and a.eligEndDate = e.eligEndDate
 
+
 );
 --14153
 
@@ -1433,11 +1441,12 @@ assessmentDate is null and ((ApptNoShowDate > a.eligEffectiveDate90) and  (ApptN
 then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by ApptNoShowDate desc ) else null end as dateHraApptNoShow91_120_rnk, -- column AC
 
 case when 
-assessmentDate is null and (ApptNoShowDate between date_sub(safe_cast(dateReassessmentDue as date), interval 90 day) and safe_cast(dateReassessmentDue as date)) and
-dateHraReassessment is null and
-dateHTR1_HraReassessment is null and
-dateHTR2_HraReassessment is null and 
-dateHTR3_HraReassessment is null
+--assessmentDate is null and 
+(ApptNoShowDate between date_sub(safe_cast(dateReassessmentDue as date), interval 90 day) and safe_cast(dateReassessmentDue as date)) and
+dateHraReassessment is null --and
+--dateHTR1_HraReassessment is null and
+--dateHTR2_HraReassessment is null and 
+--dateHTR3_HraReassessment is null
 then rank()over(partition by a.memberid,a.eligEffectiveDate,a.eligEndDate order by ApptNoShowDate desc ) else null end as dateApptNoShowHraReassessment_rnk -- column AG
 
 From
@@ -1450,9 +1459,10 @@ DBT_HRA_Model as c
 on a.memberid = c.memberid and a.eligEffectiveDate = c.eligEffectiveDate and a.eligEndDate = c.eligEndDate
 )
 
+
 ,dateApptNoShowHra90_stg as (
 Select distinct memberid,eligEffectiveDate,eligEndDate,ApptNoShowDate,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateApptNoShowHra90_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateApptNoShowHra90_rnk
 From 
 dateApptNoShow_stg
 where dateApptNoShowHra90_rnk is not null
@@ -1473,7 +1483,7 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateHraApptNoShow91_120_stg as (
 Select memberid,eligEffectiveDate,eligEndDate,ApptNoShowDate,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateHraApptNoShow91_120_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateHraApptNoShow91_120_rnk
 From 
 dateApptNoShow_stg
 where dateHraApptNoShow91_120_rnk is not null
@@ -1494,10 +1504,10 @@ group by memberId,eligEffectiveDate,eligEndDate
 
 ,dateApptNoShowHraReassessment_stg as (
 Select memberid,eligEffectiveDate,eligEndDate,ApptNoShowDate,
-dense_rank()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateApptNoShowHraReassessment_rnk
+row_number()over(partition by  memberid,eligEffectiveDate,eligEndDate order by ApptNoShowDate desc ) as dateApptNoShowHraReassessment_rnk
 From 
 dateApptNoShow_stg
-where dateHraApptNoShow91_120_rnk is not null
+where dateApptNoShowHraReassessment_rnk is not null
 )
 
 
@@ -1555,17 +1565,16 @@ case when
 dateApptNoShowHraReassessment is not null and
 (dateOutreach1_275_365 >= dateApptNoShowHraReassessment) and 
 ((dateHTRSuccessHraReassessment is null) or (dateHTRSuccessHraReassessment < dateApptNoShowHraReassessment))and
-dateHraReassessment is null and
-dateHTR1_HraReassessment is null and
-dateHTR2_HraReassessment is null and
-dateHTR3_HraReassessment is null
+dateHraReassessment is null --and
+--dateHTR1_HraReassessment is null and
+--dateHTR2_HraReassessment is null and
+--dateHTR3_HraReassessment is null
 then dateApptNoShowHraReassessment end as dateRefusalNoShowHraReassessment--column AH
 
 From
 dateApptNoShow
 
 );
-
 
 
 --Care Plans
