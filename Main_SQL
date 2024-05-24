@@ -2908,8 +2908,8 @@ date_HRA90 is null and
 date_Initial_HRA is null and
 b.date_Of_refusal is null and
 (date_Outreach1_90 between enrollment_Effective_Date and enrollment_Effective_Date90) and
-(date_Outreach1_90 <= reporting_end_date) and
-(date_Outreach_Success90 <= date_Outreach1_90 or date_Outreach_Success90 is null)
+(date_Outreach1_90 <= reporting_end_date) --and
+--(date_Outreach_Success90 <= date_Outreach1_90 or date_Outreach_Success90 is null)
 then 'HTR' else null end as HTR_Flag,
 
 date_Outreach_Success90,
@@ -2933,8 +2933,8 @@ date_HTR2_Hra_Reassessment is not null and
 date_HTR3_Hra_Reassessment is not null and
 date_Hra_Reassessment is null and
 date_Hra_Reassessment_Refusal  is null and
-(date_HTR1_Hra_Reassessment <= reporting_end_date) and
-(date_HTR_Success_Hra_Reassessment <= date_HTR1_Hra_Reassessment or date_HTR_Success_Hra_Reassessment is null)
+(date_HTR1_Hra_Reassessment <= reporting_end_date) --and
+--(date_HTR_Success_Hra_Reassessment <= date_HTR1_Hra_Reassessment or date_HTR_Success_Hra_Reassessment is null)
 then 'HTR_Reassessment' else null end as Reasseement_HTR_Flag,
 
 date_Mailer_Hra_Reassessment,
@@ -3054,14 +3054,15 @@ where
 date_Outreach1_90 is not null and
 date_Outreach2_90 is not null and
 date_Outreach3_90 is not null and
-((date_Outreach_Success90 <= date_Outreach1_90) or 
-(date_Outreach_Success90 is null)) and
+--((date_Outreach_Success90 <= date_Outreach1_90) or 
+--(date_Outreach_Success90 is null)) and
 date_HRA90 is null and
 date_Initial_HRA is null and
 date_Hra90_Refusal is null and 
 date_Refusal_No_Show_Hra90 is null and
 date_Appointment_90_plus_Hra90 is null and
 (rating_Category_Reporting_Period_End != 'DF1' or rating_Category_Reporting_Period_End is null) and
+date_Appt_No_Show_Hra90 is null and 
 patient_Id is not null and 
 deceased_status is null
 );
@@ -3133,9 +3134,9 @@ date_HTR1_Hra_Reassessment is not null and
 date_HTR2_Hra_Reassessment is not null and 
 date_HTR3_Hra_Reassessment is not null and 
 date_Mailer_Hra_Reassessment is not null and
-(date_HTR_Success_Hra_Reassessment < date_HTR1_Hra_Reassessment) and
-(date_HTR_Success_Hra_Reassessment < date_HTR2_Hra_Reassessment) and 
-(date_HTR_Success_Hra_Reassessment < date_HTR3_Hra_Reassessment) and
+--(date_HTR_Success_Hra_Reassessment < date_HTR1_Hra_Reassessment) and
+--(date_HTR_Success_Hra_Reassessment < date_HTR2_Hra_Reassessment) and 
+--(date_HTR_Success_Hra_Reassessment < date_HTR3_Hra_Reassessment) and
 date_HRA_Reassessment is null and
 date_Hra_Reassessment_Refusal is null and
 date_Refusal_No_Show_Hra_Reassessment is null and 
