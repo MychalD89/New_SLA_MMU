@@ -532,8 +532,7 @@ on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.e
 
 CREATE TEMP TABLE Outreaches_temp_table as (
 
-with outreaches_30_count as (
-
+with outreaches_30_count_stg as (
 Select a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate,
 COUNT(DISTINCT(CONCAT(b.modality, '|', b.outreachDate))) AS outreach30
 From
@@ -568,6 +567,29 @@ Successful = 0 and
 )
 Group by 
 a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate
+)
+
+
+--udpating so that members with an initial HRA and no outreaches during first 30 days of enrollment are counted as having 1 outreach MD 06/03/2024
+, outreaches_30_count as (
+Select a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate,1 as outreach30
+from 
+eligible_assessments as a
+full join
+outreaches_30_count_stg as b 
+on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.eligEndDate = b.eligEndDate
+where dateInitialHra is not null and 
+b.outreach30 is null and 
+date_diff(dateInitialHra,eligEffectiveDate,day) <= 30
+
+Union all
+
+
+Select 
+patientid,memberid,eligEffectiveDate,eligEndDate,outreach30
+from 
+outreaches_30_count_stg
+
 )
 
 
