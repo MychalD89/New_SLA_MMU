@@ -16,10 +16,10 @@ unnested_patientids as patientid,--column A
 memberid,--column B
 eligEffectiveDate,--column F
 eligEndDate,--column G
-DATE_ADD(eligEffectiveDate, INTERVAL 30 DAY) as eligEffectiveDate30,--column I
-DATE_ADD(eligEffectiveDate, INTERVAL 90 DAY) as eligEffectiveDate90,--column J
-DATE_ADD(eligEffectiveDate, INTERVAL 120 DAY) as eligEffectiveDate120,--column K
-DATE_SUB(eligEffectiveDate, INTERVAL 30 DAY) eligEffectiveDatePrior30 --column H
+DATE_SUB(DATE_ADD(eligEffectiveDate, INTERVAL 30 DAY),interval 1 day) as eligEffectiveDate30,--column I
+DATE_SUB(DATE_ADD(eligEffectiveDate, INTERVAL 90 DAY),interval 1 day) as eligEffectiveDate90,--column J
+DATE_SUB(DATE_ADD(eligEffectiveDate, INTERVAL 120 DAY),interval 1 day) as eligEffectiveDate120,--column K
+DATE_ADD(DATE_SUB(eligEffectiveDate, INTERVAL 30 DAY),interval 1 day) eligEffectiveDatePrior30 --column H
   FROM `cityblock-analytics.abs_member.abs_enterprise_member_elig_compliance`  
   cross join
 unnest (patientIds) as unnested_patientids 
@@ -529,7 +529,6 @@ on a.memberid = b.memberid and a.eligEffectiveDate = b.eligEffectiveDate and a.e
 );
 
 
-
 CREATE TEMP TABLE Outreaches_temp_table as (
 
 with outreaches_30_count_stg as (
@@ -561,14 +560,13 @@ or
 (outreachDate between eligEffectiveDate and eligEffectiveDate30) and
 (outreachDate between eligEffectiveDate and eligEndDate) and
 (outreachDate <= reporting_end_date) and
-Successful = 0 and
-(date(c.attemptedAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate30) and
-(date(c.attemptedAt,"America/New_York") <= reporting_end_date )
+Successful = 0 --and
+--(date(c.attemptedAt,"America/New_York") between eligEffectiveDate and eligEffectiveDate30) and
+--(date(c.attemptedAt,"America/New_York") <= reporting_end_date )
 )
 Group by 
 a.patientid,a.memberid,a.eligEffectiveDate,a.eligEndDate
 )
-
 
 --udpating so that members with an initial HRA and no outreaches during first 30 days of enrollment are counted as having 1 outreach MD 06/03/2024
 , outreaches_30_count as (
