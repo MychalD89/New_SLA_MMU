@@ -675,9 +675,9 @@ or
   outreachType != 'Assessment Scheduling' and 
 safe_cast(dateReassessmentDue as date) is not null and 
 dateHraReassessment is null and
-(date(c.notesCreatedAt,"America/New_York") between a.eligEffectiveDate and safe_cast(dateReassessmentDue as date)) and 
-(date(c.notesCreatedAt,"America/New_York") between a.eligEffectiveDate and a.eligEndDate) and
-(date(c.notesCreatedAt,"America/New_York") <= reporting_end_date) and
+(outreachDate between a.eligEffectiveDate and safe_cast(dateReassessmentDue as date)) and 
+(outreachDate between a.eligEffectiveDate and a.eligEndDate) and
+(outreachDate <= reporting_end_date) and
 (outreachDate between date_sub(safe_cast(dateReassessmentDue as date),interval 90 day) and safe_cast(dateReassessmentDue as date))
 )
 /*
