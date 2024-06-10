@@ -3254,3 +3254,51 @@ select * from SLA_16;
 select * from SLA_17;
 select * from SLA_18;
 select * from SLA_19;
+
+---------------------------------------------------------------------------------------
+-- Quality Checks MMU
+---------------------------------------------------------------------------------------
+
+-- Check to see if there are any dupes in MMU
+Select 'Dupes in MMU' as Dupe_check,patient_id,first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,count(patient_id) as pt_count
+From MMU_Output
+Group by patient_id,first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date
+Having pt_count > 1
+
+Union all
+
+--SLA 7 QA
+Select 'Check to see if members eligilbty falls within the parameters for SLA 7' as SLA_7_QA,patient_id,first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date, null as pt_count
+From SLA_7
+where 
+(enrollment_Effective_Date < reporting_start_date) or (enrollment_Effective_Date > reporting_start_date) or
+(enrollment_End_Date < reporting_end_date)
+
+Union All
+
+--SLA 8 QA
+
+Select 'Check to see if date_Hra_Reporting_Period is populated and member falls in elgiblity date criteria' as SLA_8_QA,patient_id,first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,null as pt_count
+From SLA_8
+where
+(date_Hra_Reporting_Period is null) or (enrollment_End_Date < reporting_end_date)
+
+Union All
+
+--SLA 9 QA
+
+Select 'Check inclusion criteria for SLA 9'as SLA_9_QA,patient_id,first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,null as pt_count
+From SLA_9
+where
+(enrollment_Effective_Date90 < reporting_start_date) or (enrollment_Effective_Date90 > reporting_end_date) or (enrollment_End_Date < reporting_end_date) or
+(date_Written_Consent90 is null and date_Verbal_Consent90 is null and date_HRA90 is null) 
+
+Union All
+
+--SLA 10 QA
+
+Select 'Check inclusion criteria for SLA 10' as SLA_10_QA, patient_id,first_Name, last_Name, date_Of_Birth,enrollment_Effective_Date,enrollment_End_Date,null as pt_count
+From SLA_10
+Where 
+(enrollment_Effective_Date90 < reporting_start_date) or (enrollment_Effective_Date90 > reporting_end_date) or (enrollment_End_Date < reporting_end_date) ;
+
